@@ -37,6 +37,7 @@ struct ServeOptions {
     std::size_t response_store_max_records = kDefaultResponseStoreRecords;
     std::size_t response_store_max_bytes   = kDefaultResponseStoreBytes;
     int device                             = 0;
+    std::optional<int> endpoint_device;
     KvCacheStorage kv_cache                = KvCacheStorage::BFloat16;
     SpeculativeOptions speculative;
     bool enable_vision      = false;

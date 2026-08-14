@@ -125,8 +125,11 @@ public:
         std::variant<std::monostate, std::unique_ptr<Executor27>, std::unique_ptr<Executor35>>;
 
     explicit Impl(EngineOptions engine_options)
-        : options(std::move(engine_options)), device(options.device) {
-        auto constructed  = targets::construct_target(options, device);
+        : options(std::move(engine_options)), device(options.device),
+          endpoint_device(options.endpoint_device
+                              ? std::make_unique<DeviceContext>(*options.endpoint_device)
+                              : nullptr) {
+        auto constructed  = targets::construct_target(options, device, endpoint_device.get());
         active            = std::move(constructed.active);
         load              = std::move(constructed.load);
         sampling_defaults = constructed.sampling_defaults;
@@ -148,10 +151,16 @@ public:
         try {
             device.synchronize();
         } catch (...) {}
+        if (endpoint_device != nullptr) {
+            try {
+                endpoint_device->synchronize();
+            } catch (...) {}
+        }
     }
 
     EngineOptions options;
     DeviceContext device;
+    std::unique_ptr<DeviceContext> endpoint_device;
     targets::ActiveTarget active;
     LoadSummary load;
     ModelSamplingDefaults sampling_defaults;

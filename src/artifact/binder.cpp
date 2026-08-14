@@ -79,7 +79,7 @@ PayloadSpan Binder::payload(ObjectHandle handle) const {
     return reader_.payload(descriptor(handle));
 }
 
-void Binder::materialize_on_device(ObjectHandle handle) {
+void Binder::materialize_on_device(ObjectHandle handle, DevicePartition partition) {
     const auto* tensor = std::get_if<TensorDescriptor>(&descriptor(handle));
     if (tensor == nullptr) {
         throw ArtifactError("resource cannot be materialized as a device tensor");
@@ -88,14 +88,17 @@ void Binder::materialize_on_device(ObjectHandle handle) {
         throw ArtifactError("artifact object has more than one materialization placement: " +
                             std::string(tensor->name));
     }
+    std::uint64_t& capacity = partition == DevicePartition::Primary
+                                  ? materialization_.device_capacity_bytes
+                                  : materialization_.secondary_device_capacity_bytes;
     const std::uint64_t alignment = tensor_alignment(tensor->layout);
-    const std::uint64_t offset    = align_up(materialization_.device_capacity_bytes, alignment);
+    const std::uint64_t offset    = align_up(capacity, alignment);
     if (tensor->bytes > std::numeric_limits<std::uint64_t>::max() - offset) {
         throw ArtifactError("materialization plan size overflows u64");
     }
     materialization_.device_objects.push_back(
-        DeviceMaterialization{handle, offset, tensor->bytes, alignment});
-    materialization_.device_capacity_bytes = offset + tensor->bytes;
+        DeviceMaterialization{handle, offset, tensor->bytes, alignment, partition});
+    capacity                               = offset + tensor->bytes;
     planned_[handle.index]                 = true;
 }
 

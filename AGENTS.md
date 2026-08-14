@@ -104,20 +104,25 @@ intermediate artifacts are excluded unless requested or themselves the deliverab
 
 ## Current product contract
 
-NInfer is a from-scratch C++/CUDA inference engine for maximum single-GPU inference performance on
-a small set of explicitly registered checkpoint artifacts. The supported identities are
+NInfer is a from-scratch C++/CUDA inference engine for maximum inference performance on a small set
+of explicitly registered checkpoint artifacts. The supported identities are
 `qwen3.6-27b/groupwise-int`, `qwen3.6-27b/nvfp4`, `qwen3.8-27b/groupwise-int`, and
-`qwen3.6-35b-a3b/groupwise-int`. The current implementation is compiled for `sm_120a` and tuned
-and measured on NVIDIA GeForce RTX 5090. All identities execute Text, image/video Vision, MTP,
-prefix reuse, CLI, OpenAI/Anthropic serving, and measurement through the same public `.ninfer`
-Engine route; the 35B-A3B target additionally supports text-only DFlash.
+`qwen3.6-35b-a3b/groupwise-int`. The current implementation is compiled for `sm_120a`; ordinary
+profiles are tuned and measured on NVIDIA GeForce RTX 5090, and the Qwen3.8 endpoint profile is
+qualified on an RTX 5070 Ti 16 GB plus RTX 5060 Ti 16 GB. All identities execute Text, image/video
+Vision, MTP, prefix reuse, CLI, OpenAI/Anthropic serving, and measurement through the same public
+`.ninfer` Engine route; the 35B-A3B target additionally supports text-only DFlash.
 
-The current workload is one GPU and one resident model instance with a startup-fixed one to eight
-active requests. The Engine forms one compact decode batch at every round boundary and uses bounded
-FIFO ingress with no request preemption. Large-scale or preemptive continuous batching, priority/QoS
-scheduling, additional checkpoint targets, and retargeting the implementation to another execution
-platform are outside the current product. This is a local, single-owner project. Registered models,
-generated artifacts, and the local workflow are trusted.
+The current workload is one resident model instance with a startup-fixed one to eight active
+requests. Ordinary profiles use one GPU. Qwen3.8-27B additionally supports an explicit second
+endpoint device: all transformer/state/KV/MTP/Vision execution remains on the primary device while
+the token embedding, output head, and startup-enabled optimized draft head execute on the endpoint
+device through pinned-host staging. The Engine forms one compact decode batch at every round
+boundary and uses bounded FIFO ingress with no request preemption. Other multi-GPU partitioning,
+large-scale or preemptive continuous batching, priority/QoS scheduling, additional checkpoint
+targets, and retargeting the implementation to another execution platform are outside the current
+product. This is a local, single-owner project. Registered models, generated artifacts, and the
+local workflow are trusted.
 Requirements derived from a different workload, trust model, or deployment model are out of scope
 until that product contract is explicitly changed.
 

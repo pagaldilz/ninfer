@@ -13,6 +13,7 @@
 #include <ninfer/targets/qwen3_6/prepared_prompt.h>
 #include <ninfer/targets/qwen3_6/decoder_state.h>
 #include "targets/qwen3_6/impl/runtime/text_context.h"
+#include "targets/qwen3_6/impl/runtime/endpoint_execution.h"
 #include "targets/qwen3_6/impl/runtime/dflash_context.h"
 #include "targets/qwen3_6/impl/runtime/vision_context.h"
 #include "targets/qwen3_6/impl/runtime/vision_prefill.h"
@@ -32,6 +33,7 @@ using qwen3_6::PromptModality;
 struct ExecutionCore {
     DeviceContext& device;
     const LoadedModelData& model;
+    qwen3_6::detail::EndpointExecution* endpoints;
     WorkspaceArena& work;
     LinearAttentionStatePool& linear_attention;
     const GdnReplayRecords* replay_records;

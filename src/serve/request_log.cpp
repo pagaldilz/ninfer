@@ -366,6 +366,8 @@ std::string format_server_start_json(
                               {"weights_id", load.weights_id},
                               {"bytes_read", load.artifact_bytes_read},
                               {"host_to_device_bytes", load.host_to_device_bytes},
+                              {"endpoint_host_to_device_bytes",
+                               load.endpoint_host_to_device_bytes},
                               {"peak_staging_bytes", load.peak_staging_bytes},
                               {"tensor_count", load.tensor_count},
                               {"resource_count", load.resource_count},
@@ -373,6 +375,8 @@ std::string format_server_start_json(
                               {"upload_seconds", load.upload_seconds}};
     record["engine"]   = Json{
           {"device", options.device},
+          {"endpoint_device",
+           options.endpoint_device ? Json(*options.endpoint_device) : Json(nullptr)},
           {"max_context", options.max_context},
           {"kv_capacity_mode", kv_capacity_mode_name(memory.kv_capacity_mode)},
           {"kv_capacity", memory.kv_capacity},
@@ -398,6 +402,7 @@ std::string format_server_start_json(
              {"greedy", options.greedy}};
     record["memory"] =
         Json{{"weights", arena_json(memory.weights)},
+             {"endpoint_weights", arena_json(memory.endpoint_weights)},
              {"sequence", arena_json(memory.sequence)},
              {"workspace", arena_json(memory.workspace)},
              {"request_transient", arena_json(memory.request_transient)},

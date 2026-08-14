@@ -1,5 +1,6 @@
 #pragma once
 #include "targets/qwen3_6/impl/runtime/instance.h"
+#include "targets/qwen3_6/impl/runtime/endpoint_execution.h"
 // Qwen3.6 family runtime implementation; instantiated only by exact variants.
 
 #include "targets/qwen3_6/impl/runtime/linear_state_slots.h"
@@ -151,7 +152,8 @@ class VisionPrefillSession;
 
 class TextContext {
 public:
-    TextContext(DeviceContext& ctx, const LoadedModelData& weights, WorkspaceArena& work,
+    TextContext(DeviceContext& ctx, const LoadedModelData& weights,
+                qwen3_6::detail::EndpointExecution* endpoints, WorkspaceArena& work,
                 qwen3_6::PagedKVCacheView kv, LinearAttentionStatePool& state,
                 qwen3_6::RoundState& io, Tensor& prefill_hidden, std::uint32_t prefill_chunk,
                 std::uint32_t text_kv_base,
@@ -232,6 +234,8 @@ public:
                              Tensor& mtp_hidden, Tensor& logits, Tensor& draft_token);
 private:
     void bind();
+    void embed(const Tensor& ids, Tensor& output);
+    void score(const Tensor& hidden, const Weight& weight, Tensor& output);
 
     [[nodiscard]] bool mtp_enabled() const noexcept {
         return mtp_kv_.valid() || batch_mtp_kv_ != nullptr;
@@ -284,6 +288,7 @@ private:
                  const MultimodalPrefill* multimodal, Tap& tap, bool finalize_at_end);
     DeviceContext& ctx_;
     const LoadedModelData& weights_;
+    qwen3_6::detail::EndpointExecution* endpoints_ = nullptr;
     WorkspaceArena& work_;
     qwen3_6::PagedKVCacheView kv_;
     qwen3_6::PagedKVCacheView mtp_kv_;

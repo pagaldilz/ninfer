@@ -1,6 +1,6 @@
 # RTX 5070 Ti + RTX 5060 Ti feasibility experiment
 
-Status: **GO for a native NInfer dual-device implementation, using endpoint offload.**
+Status: **IMPLEMENTED AND QUALIFIED through the public NInfer Engine and HTTP server.**
 
 This experiment answers two separate questions:
 
@@ -10,15 +10,17 @@ This experiment answers two separate questions:
    **No.** The text weights alone leave only 991,232 bytes on the 5070 Ti before CUDA state, KV,
    workspace, and graph allocations.
 
-The recommended design keeps the latency-critical transformer and MTP weights on the 5070 Ti and
-places the two large vocabulary matrices, draft head, and Vision weights on the 5060 Ti. It is a
+The implemented design keeps the latency-critical transformer, MTP, Vision, state, KV, and
+workspace on the 5070 Ti and places the two large vocabulary matrices plus the optional optimized
+draft head on the 5060 Ti. It is a
 better single-request design than layer splitting because all 64 text layers stay on the card with
 twice the measured memory bandwidth. It is also a better fit than tensor parallelism because this
 machine has no CUDA peer access between the cards.
 
-This branch contains the reproducible feasibility tools and measurements. It does **not** yet add
-multi-device ownership to the public Engine, so the projected NInfer end-to-end rate below is a
-target for the implementation, not a completed benchmark claim.
+The public `EngineOptions`, CLI, and server expose the profile as `endpoint_device` /
+`--endpoint-device`. The complete `.ninfer` artifact is split into two device-owned arenas at load
+time, while all runtime crossings use fixed pinned-host buffers. The ordinary one-device profiles
+remain unchanged when the option is omitted.
 
 ## Tested machine
 
@@ -71,40 +73,68 @@ The explicit pinned-host boundary probe measured:
 | 491,520 bytes | 231.442 us | 231.507 us |
 | 10,485,760 bytes | 3,054.906 us | 3,084.067 us |
 
-The two C=1 crossings add 142.371 us per base round. That is small beside the 3.283 ms output head
-and the transformer-layer traversal.
+One base round transfers two 10,240-byte hidden vectors in opposite directions and returns roughly
+497 KB of logits from the endpoint. Using the nearest measured payload gives about 0.38 ms of
+host-staged transfer per round. That is still small beside the 3.283 ms output head and the
+transformer-layer traversal.
 
-## Exact residency plan
+## Measured residency
 
 The downloaded
 `model-cards/Qwen3.8-27B-NInfer/qwen3_8_27b.ninfer` is 18,210,531,328 bytes. Its tensor
 directory produces this placement without estimating from the file size:
 
-| Device | Contents | Weights | Physical headroom |
-|---|---|---:|---:|
-| 5070 Ti | all 64 text layers, final norm, MTP | 13.824 GiB | 2.097 GiB |
-| 5060 Ti | token embedding, output head, draft head, Vision | 3.124 GiB | 12.804 GiB |
+| Profile and device | Contents | Resident weight arena |
+|---|---|---:|
+| MTP0, 5070 Ti primary | 64 text layers and final norm | 14,391,769,088 bytes (13.404 GiB) |
+| MTP0, 5060 Ti endpoint | token embedding and output head | 2,701,721,600 bytes (2.516 GiB) |
+| MTP3 optimized, 5070 Ti primary | text, final norm, and MTP | 14,843,560,960 bytes (13.824 GiB) |
+| MTP3 optimized, 5060 Ti endpoint | embedding, output head, and draft head | 3,058,761,728 bytes (2.848 GiB) |
 
-The 5070 Ti headroom can hold the execution workspace, fixed state, and a useful INT8 KV cache.
-At 33,792 bytes per token for the 27B main INT8 KV layout, the physical upper bound from headroom
-alone is about 66,600 tokens; allocator, graph, state, workspace, and the configured 1 GiB automatic
-reserve reduce the actual supported capacity. A 16K or 32K first implementation target is
-therefore realistic and must be checked by the Engine capacity solver rather than hard-coded.
+With MTP3, one active request, a 2,048-token INT8 KV capacity, and no Vision, the primary retained
+293 MiB free after startup. The MTP0 4,096-token profile retained 671 MiB. These are measured Engine
+memory ledgers rather than file-size estimates. A larger context or Vision profile must be sized by
+the Engine on this tight 16 GB primary; 16K/32K is not supported by the measured MTP3 profile.
 
-The measured-component lower bound is:
+The pre-implementation component model was:
 
 ```text
 14,391,762,944 fast-device bytes / 852.7 GB/s
 + 3.283232 ms output head
-+ 0.142371 ms two-device boundary
-= 20.303 ms, or a 49.25 base-round/s ceiling
++ approximately 0.38 ms two-device boundary
+= approximately 20.54 ms, or a 48.7 base-round/s ceiling
 ```
 
-This omits attention, recurrent state, launch, synchronization, sampling, and other work. A
-reasonable implementation target is **40-49 non-speculative tok/s**, versus the measured LM Studio
-GGUF median of **28.69 wall tok/s**: approximately **1.4-1.7x** if integration overhead remains
-controlled. MTP can commit more than one token per target round, but no MTP throughput number is
-claimed before the complete Engine route is running and acceptance is measured.
+It correctly identified the endpoint projection as the useful split but, as expected, omitted
+attention, recurrent state, launch, synchronization, and sampling costs. The complete route
+measured **34.9 non-speculative decode tok/s** on a deterministic 256-token counting request.
+
+## End-to-end generation
+
+All rows below ran through `ninfer-serve` and `POST /v1/chat/completions` after server warm-up with
+one request, greedy decoding, no thinking, INT8 KV, and 256 generated tokens. Decode throughput is
+the server's `(completion_tokens - 1) / decode_seconds` metric.
+
+| Workload | Profile | Decode | TTFT | Wall | Acceptance | Tokens/round |
+|---|---|---:|---:|---:|---:|---:|
+| Natural-language photosynthesis prose | MTP0 | 34.9 tok/s | 651 ms | 7.96 s | n/a | 1.00 |
+| Natural-language photosynthesis prose | MTP3 optimized | 73.9 tok/s | 545 ms | 4.00 s | 64.9% | 2.93 |
+| Counting sequence | MTP3 optimized | 101.3 tok/s | 1,061 ms | 3.58 s | 100.0% | 3.98 |
+
+The prose pair is the useful headline for this setup: MTP3 improves decode by **2.12×** on the same
+prompt and produces the same greedy response. The counting row is a valid predictable-output best
+case. The non-speculative rate also exceeds the earlier 28.69 wall tok/s LM Studio GGUF control,
+but that comparison is directional because the two servers expose different prompt rendering
+paths.
+
+## Storage result
+
+The original `H:` model location is a WDC WD140EDFZ 14 TB SATA HDD. Loading the 15.92 GiB MTP0
+resident payload from that path took **258.257 s**. The same profile from an SHA-256-verified copy
+on the `D:` Micron NVMe loaded in **105.437 s**, a **2.45× startup improvement**. A separate MTP3
+load from D: completed in 71.156 s, but its selected tensor ranges and cache state differ, so it is
+not used for the disk multiplier. Storage location does not affect steady token generation after
+the weights are resident in VRAM.
 
 ## GGUF result
 
@@ -146,28 +176,26 @@ Tensor parallelism changed the median by -0.2%, consistent with the absent P2P p
 global strategy was restored to Priority order and the benchmark model was unloaded after the
 measurement.
 
-## Implementation cut
+## Implemented execution profile
 
-The next code cut should be one exact Qwen3.8 endpoint-offload execution profile, not a generic
-multi-GPU framework:
+The change is one exact Qwen3.8 endpoint-offload profile, not a generic multi-GPU framework:
 
 1. Add an optional endpoint device to `EngineOptions` and the CLI/server startup options. Omission
    preserves the existing one-device profiles; Qwen3.8 endpoint offload requires two distinct
    devices.
 2. Let the target binder assign each tensor to one of two materialization partitions. The generic
    artifact layer owns the two arenas and uploads, while the Qwen3.8 target owns the placement.
-3. Keep all text state, KV, layer workspace, and MTP tensors on the primary device. Put the token
-   embedding, full output head, draft head, and Vision weights on the endpoint device.
+3. Keep all text state, KV, layer workspace, MTP, and Vision on the primary device. Put the token
+   embedding, full output head, and optional optimized draft head on the endpoint device.
 4. Make embedding and scoring compile-time execution leaves of the family schedule. The ordinary,
    prefill, MTP, and Vision schedules call the same leaf contract; the dual Qwen3.8 leaf performs
    explicit pinned-host staging and device/stream selection.
-5. Capture device-local CUDA graphs separately. Host orchestration performs the cross-device
-   boundary; graph capture must not assume one stream owns pointers from both devices.
-6. First qualify C=1 at 16K/32K INT8 KV with greedy MTP0, then MTP3, then C=2..8. Report server
-   decode timing and acceptance, not the 49.25 component ceiling.
+5. Disable CUDA Graph capture for this explicit host-staged route. Existing one-device profiles
+   retain their graph behavior.
+6. Qualify C=1 at 4,096-token MTP0 and 2,048-token MTP3 capacities, reporting server decode timing
+   and acceptance rather than the component ceiling.
 
-Layer splitting remains a fallback only if actual runtime allocations exceed the 2.097 GiB primary
-headroom. Tensor parallelism is rejected for this topology.
+Layer splitting and tensor parallelism remain rejected for this topology.
 
 ## Reproduction
 
@@ -182,9 +210,8 @@ docker run --rm --gpus all -v "${PWD}:/workspace" -w /workspace `
   -DBUILD_TESTING=ON -DNINFER_BUILD_BENCHMARKS=ON
 
 docker run --rm --gpus all -v "${PWD}:/workspace" -w /workspace `
-  ninfer-rtx50-dev:cuda13.1 cmake --build build-rtx50-linux --parallel 12 --target `
-  ninfer_q4_linear_swiglu_bench ninfer_q5_linear_add_bench ninfer_linear_bench `
-  ninfer_linear_swiglu_q4_a16_test ninfer_linear_add_q5_a16_test
+  ninfer-rtx50-dev:cuda13.1 cmake --build build-rtx50-linux --parallel 4 --target `
+  ninfer-serve ninfer_artifact_materialization_test ninfer_serve_options_test
 ```
 
 Compile and run the boundary probe:
@@ -215,4 +242,17 @@ local server:
 
 ```powershell
 python experiments/rtx50/benchmark_openai.py --model qwen38-bench
+```
+
+Run the measured MTP3 endpoint from the NVMe copy:
+
+```powershell
+docker run --rm --gpus all -p 127.0.0.1:18080:8080 `
+  -v "${PWD}:/workspace" -v "D:\AiModels\NInfer:/models:ro" `
+  -w /workspace ninfer-rtx50-dev:cuda13.1 `
+  ./build-rtx50-linux/apps/ninfer-serve /models/qwen3_8_27b.ninfer `
+  --host 0.0.0.0 --port 8080 --api-key local-secret --model-id qwen3.8-27b `
+  --device 0 --endpoint-device 1 --max-context 2048 --kv-capacity 2048 `
+  --kv-dtype int8 --spec mtp --draft-tokens 3 --lm-head-draft `
+  --no-thinking --greedy
 ```

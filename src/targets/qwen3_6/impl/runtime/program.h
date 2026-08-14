@@ -10,6 +10,7 @@
 
 #include "targets/qwen3_6/impl/runtime/layouts.h"
 #include "targets/qwen3_6/impl/runtime/dflash_context.h"
+#include "targets/qwen3_6/impl/runtime/endpoint_execution.h"
 #include "targets/qwen3_6/impl/runtime/linear_state_slots.h"
 #include "targets/qwen3_6/impl/runtime/prefix_identity.h"
 #include "targets/qwen3_6/impl/runtime/text_context.h"
@@ -189,7 +190,7 @@ struct RequestControl {
 class ProgramImplCore {
 public:
     ProgramImplCore(const LoadedModelData& model, const SequencePlanImpl& plan,
-                    DeviceContext& device);
+                    DeviceContext& device, DeviceContext* endpoint_device);
     ~ProgramImplCore() noexcept;
 
     [[nodiscard]] RequestBasePlan
@@ -228,6 +229,7 @@ public:
 
     const LoadedModelData& model;
     DeviceContext& device;
+    DeviceContext* endpoint_device;
     const std::uint32_t capacity;
     const std::uint32_t kv_capacity;
     const std::uint32_t max_concurrency;
@@ -243,6 +245,8 @@ public:
     const std::size_t graph_allowance_bytes;
     std::size_t graph_observed_bytes = 0;
     const WorkspacePlan workspace_plan;
+
+    std::unique_ptr<qwen3_6::detail::EndpointExecution> endpoints;
 
     DeviceArena persistent;
     DeviceArena workspace_storage;

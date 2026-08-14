@@ -81,3 +81,16 @@ The profile binds the embedding and output head as W8 and the Text body through 
 binding. Workspace selection follows the groupwise execution routes. The registry constructs the
 27B `LoadedModel`, `SequencePlan`, and `Program`, and reports
 `qwen3_8_27b/qwen3.8-27b/groupwise-int` in the load summary.
+
+When `EngineOptions::endpoint_device` is present, binding assigns `text/token_embedding`,
+`text/output_head`, and a startup-enabled `text/draft_head` to the secondary materialization
+partition. Draft token IDs, all text layers, final norm, MTP, and startup-enabled Vision remain on
+the primary device. The generic artifact materializer owns one arena per selected device; the
+target owns this exact placement.
+
+The family runtime crosses the endpoint boundary only at embedding and vocabulary projection.
+With no CUDA peer access it copies primary device → pinned host → endpoint device, executes the
+existing production Op on the endpoint stream, then returns the represented BF16 output through
+pinned host memory. No mutable state or allocation is shared between devices. This profile
+requires distinct device IDs and `use_cuda_graph=false`; CLI and server parsing disable graphs
+automatically when `--endpoint-device` is selected.

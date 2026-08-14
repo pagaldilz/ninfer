@@ -63,11 +63,13 @@ void require_positive_finite(std::uint32_t bits, std::string_view label) {
 }
 
 WeightPlan bind_weight(artifact::Binder& binder, std::string_view name, NumericFormat format,
-                       std::initializer_list<std::uint64_t> shape) {
+                       std::initializer_list<std::uint64_t> shape,
+                       artifact::TensorPlacement placement =
+                           artifact::TensorPlacement::Device) {
     if (format == NumericFormat::NVFP4) {
         throw std::logic_error("NVFP4 weight requires a paired input divisor");
     }
-    return WeightPlan{.object = artifact::bind_device_tensor(binder, name, format, shape),
+    return WeightPlan{.object = artifact::bind_tensor(binder, name, format, shape, placement),
                       .format = format};
 }
 
@@ -337,15 +339,25 @@ void validate_draft_ids(const artifact::Binder& binder, artifact::ObjectHandle h
 } // namespace
 
 ArtifactLoadPlan bind_artifact(artifact::Binder& binder, WeightsProfile weights_profile,
-                               qwen3_6::StartupFeatures features) {
+                               qwen3_6::StartupFeatures features, bool endpoint_offload) {
     ArtifactLoadPlan load_plan;
     BindingPlan& out = load_plan.bindings;
     out.frontend     = qwen3_6::bind_frontend_resources(binder);
     out.features     = features;
+    out.endpoint_offload = endpoint_offload;
+
+    if (endpoint_offload && weights_profile != WeightsProfile::GroupwiseIntW8Endpoints) {
+        throw std::invalid_argument(
+            "endpoint offload requires qwen3.8 W8 endpoint weights");
+    }
+    const artifact::TensorPlacement endpoint_placement =
+        endpoint_offload ? artifact::TensorPlacement::SecondaryDevice
+                         : artifact::TensorPlacement::Device;
 
     const NumericFormat vocabulary_format = endpoint_format(weights_profile);
     out.token_embedding =
-        bind_weight(binder, "text/token_embedding", vocabulary_format, {248320, 5120});
+        bind_weight(binder, "text/token_embedding", vocabulary_format, {248320, 5120},
+                    endpoint_placement);
     switch (weights_profile) {
     case WeightsProfile::GroupwiseInt:
     case WeightsProfile::GroupwiseIntW8Endpoints:
@@ -359,14 +371,21 @@ ArtifactLoadPlan bind_artifact(artifact::Binder& binder, WeightsProfile weights_
     }
     out.final_norm =
         artifact::bind_device_tensor(binder, "text/final_norm", NumericFormat::BF16, {5120});
-    out.output_head = bind_weight(binder, "text/output_head", vocabulary_format, {248320, 5120});
-    const artifact::TensorPlacement proposal_placement =
+    out.output_head = bind_weight(binder, "text/output_head", vocabulary_format, {248320, 5120},
+                                  endpoint_placement);
+    const artifact::TensorPlacement proposal_head_placement =
+        !features.optimized_proposal()
+            ? artifact::TensorPlacement::ValidateOnly
+            : endpoint_offload ? artifact::TensorPlacement::SecondaryDevice
+                               : artifact::TensorPlacement::Device;
+    const artifact::TensorPlacement proposal_ids_placement =
         features.optimized_proposal() ? artifact::TensorPlacement::Device
                                       : artifact::TensorPlacement::ValidateOnly;
     out.draft_head = artifact::bind_tensor(binder, "text/draft_head", NumericFormat::Q4G64_F16S,
-                                           {131072, 5120}, proposal_placement);
+                                           {131072, 5120}, proposal_head_placement);
     out.draft_head_token_ids = artifact::bind_tensor(
-        binder, "text/draft_head_token_ids", NumericFormat::I32, {131072}, proposal_placement);
+        binder, "text/draft_head_token_ids", NumericFormat::I32, {131072},
+        proposal_ids_placement);
     validate_draft_ids(binder, out.draft_head_token_ids);
 
     const artifact::TensorPlacement mtp_placement = features.mtp()
@@ -417,6 +436,11 @@ LoadedModelData::LoadedModelData(BindingPlan plan, artifact::MaterializedArtifac
     frontend = qwen3_6::take_frontend_resources(backing, plan.frontend);
 
     runtime.weights_arena = &backing.device_arena();
+    runtime.endpoint_weights_arena =
+        plan.endpoint_offload
+            ? &backing.device_arena(artifact::DevicePartition::Secondary)
+            : nullptr;
+    runtime.endpoint_offload = plan.endpoint_offload;
     runtime.features      = plan.features;
     auto& token_embedding = runtime.token_embedding;
     auto& full_layers     = runtime.full_layers;

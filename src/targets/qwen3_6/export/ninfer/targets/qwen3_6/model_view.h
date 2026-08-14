@@ -88,6 +88,8 @@ struct ModelView {
     using DFlash    = DFlashPayload;
 
     DeviceArena* weights_arena = nullptr;
+    DeviceArena* endpoint_weights_arena = nullptr;
+    bool endpoint_offload = false;
     Weight token_embedding;
     std::array<FullLayer, FullAttentionLayers> full_layers;
     std::array<GdnLayer, GdnLayers> gdn_layers;

@@ -37,6 +37,7 @@ public:
 
 private:
     void require_range(std::size_t byte_offset, std::size_t count, const char* operation) const;
+    int device_ = -1;
 };
 
 class DeviceArena {
@@ -86,6 +87,7 @@ private:
     std::size_t off_  = 0;
     std::size_t peak_ = 0;
     bool owns_        = true;
+    int device_       = -1;
 };
 
 class PinnedHostBuffer {

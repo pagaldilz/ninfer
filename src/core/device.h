@@ -26,6 +26,7 @@ struct DeviceContext {
 
     int sm() const noexcept;
     std::size_t total_vram() const noexcept;
+    void activate() const;
     void synchronize() const;
 };
 

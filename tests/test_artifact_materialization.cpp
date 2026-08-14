@@ -159,6 +159,45 @@ int main() {
         require(materialized.device_arena().capacity() == plan.device_capacity_bytes &&
                     materialized.device_arena().used() == plan.device_capacity_bytes,
                 "materialized tensor does not own the planned device backing");
+
+        if (device_count >= 2) {
+            ninfer::artifact::Binder split_binder(reader);
+            const auto split_resource = split_binder.require_resource(
+                "frontend/test.json", ninfer::artifact::ResourceEncoding::RawBytesV1);
+            split_binder.retain_on_host(split_resource);
+            const auto primary_tensor = split_binder.require_tensor(
+                "weights/test", ninfer::artifact::NumericFormat::BF16,
+                ninfer::artifact::StorageLayout::ContiguousLeV1, tensor_shape);
+            split_binder.materialize_on_device(primary_tensor);
+            const auto secondary_tensor = split_binder.require_tensor(
+                "weights/second", ninfer::artifact::NumericFormat::BF16,
+                ninfer::artifact::StorageLayout::ContiguousLeV1, second_shape);
+            split_binder.materialize_on_device(
+                secondary_tensor, ninfer::artifact::DevicePartition::Secondary);
+            const auto split_plan = split_binder.finish();
+            require(split_plan.device_capacity_bytes == kTensor.size() &&
+                        split_plan.secondary_device_capacity_bytes == kSecondTensor.size(),
+                    "binder did not preserve independent device partitions");
+
+            ninfer::DeviceContext secondary_device(1);
+            auto split = ninfer::artifact::materialize(reader, split_plan, device,
+                                                        &secondary_device, nullptr);
+            device.activate();
+            copied.fill(std::byte{});
+            CUDA_CHECK(cudaMemcpy(copied.data(), split.device_data(primary_tensor), copied.size(),
+                                  cudaMemcpyDeviceToHost));
+            secondary_device.activate();
+            second_copied.fill(std::byte{});
+            CUDA_CHECK(cudaMemcpy(second_copied.data(), split.device_data(secondary_tensor),
+                                  second_copied.size(), cudaMemcpyDeviceToHost));
+            require(copied == kTensor && second_copied == kSecondTensor,
+                    "split-device tensor payload differs from the artifact");
+            require(split.stats().secondary_h2d_bytes == kSecondTensor.size() &&
+                        split.device_arena(ninfer::artifact::DevicePartition::Secondary)
+                                .capacity() == kSecondTensor.size(),
+                    "secondary materialization statistics or ownership are incomplete");
+            device.activate();
+        }
         return 0;
     } catch (const std::exception& error) {
         std::cerr << error.what() << '\n';

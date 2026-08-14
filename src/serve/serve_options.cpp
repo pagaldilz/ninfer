@@ -67,6 +67,7 @@ std::string serve_usage_text(const char* argv0) {
            "[--model-id ID] [--max-context N] [--kv-capacity N|auto] [--max-concurrency N] "
            "[--max-pending-requests N] [--pending-timeout-ms N] "
            "[--prefill-chunk N] [--log-stats-interval-ms N] [--device N] "
+           "[--endpoint-device N] "
            "[--max-request-mib N] [--request-log-jsonl FILE] "
            "[--response-store-max-records N] [--response-store-max-mib N] "
            "[--kv-dtype bf16|int8] [--spec mtp|dflash --draft-tokens N] "
@@ -86,6 +87,8 @@ std::string serve_usage_text(const char* argv0) {
            "default\n"
            "       --log-stats-interval-ms defaults to 5000; 0 disables periodic throughput logs\n"
            "       --vision enables media and loads the fixed Vision GPU allocations\n"
+           "       --endpoint-device moves Qwen3.8 embedding/output weights to a second GPU; "
+           "CUDA Graphs are disabled\n"
            "       --kv-capacity auto leaves " +
            std::to_string(kDefaultKvCapacityHeadroomBytes / (1024ULL * 1024ULL)) +
            " MiB of sizing headroom\n"
@@ -183,6 +186,9 @@ ServeOptions parse_serve_options(int argc, char** argv) {
             options.response_store_max_bytes = static_cast<std::size_t>(mib << 20);
         } else if (arg == "--device") {
             options.device = parse_nonnegative_int(require_value("--device"), "device");
+        } else if (arg == "--endpoint-device") {
+            options.endpoint_device = parse_nonnegative_int(
+                require_value("--endpoint-device"), "endpoint-device");
         } else if (arg == "--kv-dtype") {
             options.kv_cache = parse_kv_dtype(require_value("--kv-dtype"));
         } else if (arg == "--spec") {
@@ -237,6 +243,12 @@ ServeOptions parse_serve_options(int argc, char** argv) {
     }
     if (!kv_capacity_explicit) {
         options.kv_capacity = KvCapacityPolicy::explicit_capacity(options.max_context);
+    }
+    if (options.endpoint_device) {
+        if (*options.endpoint_device == options.device) {
+            throw std::invalid_argument("--endpoint-device must differ from --device");
+        }
+        options.use_cuda_graph = false;
     }
     if (options.port <= 0 || options.port > 65535) {
         throw std::invalid_argument("--port must be in [1,65535]");

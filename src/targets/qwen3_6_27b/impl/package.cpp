@@ -100,7 +100,8 @@ Package::LoadPlan Package::plan_load(artifact::Binder& binder, const EngineOptio
                                      WeightsProfile weights_profile) {
     return LoadPlan(std::make_unique<LoadPlan::Impl>(
         weights_profile,
-        detail::bind_artifact(binder, weights_profile, qwen3_6::startup_features(options))));
+        detail::bind_artifact(binder, weights_profile, qwen3_6::startup_features(options),
+                              options.endpoint_device.has_value())));
 }
 
 std::unique_ptr<Package::LoadedModel>
@@ -125,10 +126,12 @@ Package::SequencePlanner Package::make_sequence_planner(DeviceContext& device,
 }
 
 std::unique_ptr<Package::Program>
-Package::create_program(const LoadedModel& model, SequencePlan&& plan, DeviceContext& device) {
+Package::create_program(const LoadedModel& model, SequencePlan&& plan, DeviceContext& device,
+                        DeviceContext* endpoint_device) {
     if (model.impl_ == nullptr) { throw std::invalid_argument("loaded model is empty"); }
     return qwen3_6::create_program<detail::Variant>(
-        model.impl_->data.runtime, model.impl_->weights_profile, std::move(plan), device);
+        model.impl_->data.runtime, model.impl_->weights_profile, std::move(plan), device,
+        endpoint_device);
 }
 
 } // namespace ninfer::targets::qwen3_6_27b

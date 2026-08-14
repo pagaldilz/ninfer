@@ -21,7 +21,8 @@ void mtp_bridge_and_propose(PrefillContext& state, const Tensor& next_token,
         throw std::invalid_argument("MTP bridge requires one three-axis rope position");
     }
     state.execution.work.reset();
-    TextContext card(state.execution.device, state.execution.model, state.execution.work,
+    TextContext card(state.execution.device, state.execution.model, state.execution.endpoints,
+                     state.execution.work,
                      state.text_kv, state.execution.linear_attention, state.execution.io,
                      state.execution.prefill_hidden, state.execution.prefill_chunk,
                      state.text_kv_base, state.mtp_kv, &state.text_cache, state.mtp_cache);
@@ -81,7 +82,8 @@ auto mtp_decode_batch_body(MtpBatchContext& state, std::int32_t batch_size, std:
                                    sizeof(qwen3_6::MtpDecodeIngress), cudaMemcpyHostToDevice,
                                    state.execution.device.stream));
 
-        TextContext card(state.execution.device, state.execution.model, state.execution.work, {},
+        TextContext card(state.execution.device, state.execution.model, state.execution.endpoints,
+                         state.execution.work, {},
                          state.execution.linear_attention, state.execution.io,
                          state.execution.prefill_hidden, state.execution.prefill_chunk, 0, {},
                          &state.text_cache, &state.mtp_cache);

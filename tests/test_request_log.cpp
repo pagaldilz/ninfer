@@ -41,6 +41,7 @@ int main() {
     options.artifact_path                  = "/models/qwen3_6_27b.ninfer";
     options.host                           = "127.0.0.1";
     options.port                           = 8123;
+    options.endpoint_device                = 1;
     options.api_key                        = "must-not-appear";
     options.model_id_override              = "deployment-alias";
     options.request_log_jsonl              = "requests.jsonl";
@@ -71,6 +72,7 @@ int main() {
     load.upload_seconds       = 0.345678901234;
     load.artifact_bytes_read  = 1000;
     load.host_to_device_bytes = 900;
+    load.endpoint_host_to_device_bytes = 300;
     load.peak_staging_bytes   = 128;
     load.tensor_count         = 42;
     load.resource_count       = 6;
@@ -83,6 +85,8 @@ int main() {
     memory.kv_capacity_max_page_groups       = 16384;
     memory.kv_cache                          = ninfer::KvCacheStorage::Int8Group64;
     memory.weights.capacity_bytes            = 100;
+    memory.endpoint_device                   = 1;
+    memory.endpoint_weights                  = {75, 75, 75};
     memory.sequence.capacity_bytes           = 200;
     memory.workspace.capacity_bytes          = 300;
     memory.request_transient                 = {500, 0, 450};
@@ -121,6 +125,10 @@ int main() {
     failures += check(server.at("artifact").at("weights_id") == "groupwise-int",
                       "server weights id missing");
     failures += check(server.at("artifact").at("size_bytes") == 123456, "artifact size missing");
+    failures += check(server.at("artifact").at("endpoint_host_to_device_bytes") == 300,
+                      "endpoint upload bytes missing");
+    failures += check(server.at("engine").at("endpoint_device") == 1,
+                      "endpoint device missing");
     failures += check(server.at("engine").at("max_context") == 262144, "max context missing");
     failures += check(server.at("engine").at("kv_capacity") == 524288, "KV capacity missing");
     failures += check(server.at("engine").at("kv_capacity_mode") == "explicit" &&
@@ -155,6 +163,8 @@ int main() {
     failures += check(server.at("memory").at("request_transient").at("capacity_bytes") == 500 &&
                           server.at("memory").at("request_transient").at("peak_used_bytes") == 450,
                       "request transient memory missing");
+    failures += check(server.at("memory").at("endpoint_weights").at("capacity_bytes") == 75,
+                      "endpoint weights memory missing");
     failures += check(server.at("memory").at("cuda_graph_allowance_bytes") == 600,
                       "CUDA Graph allowance missing");
     failures += check(server.at("memory").at("runtime_reservation_bytes") == 1600 &&

@@ -217,14 +217,16 @@ void DFlashFeatureSink::consume_prefill_chunk(std::int32_t tokens, bool turn_che
     consume_prefill(feature_window, position_window, turn_checkpoint);
 }
 
-TextContext::TextContext(DeviceContext& ctx, const LoadedModelData& weights, WorkspaceArena& work,
+TextContext::TextContext(DeviceContext& ctx, const LoadedModelData& weights,
+                         qwen3_6::detail::EndpointExecution* endpoints, WorkspaceArena& work,
                          qwen3_6::PagedKVCacheView kv, LinearAttentionStatePool& state,
                          qwen3_6::RoundState& io, Tensor& prefill_hidden,
                          std::uint32_t prefill_chunk, std::uint32_t text_kv_base,
                          qwen3_6::PagedKVCacheView mtp_kv,
                          const qwen3_6::PagedKVCache* batch_text_kv,
                          const qwen3_6::PagedKVCache* batch_mtp_kv)
-    : ctx_(ctx), weights_(weights), work_(work), kv_(kv), mtp_kv_(mtp_kv), state_(state), io_(io),
+    : ctx_(ctx), weights_(weights), endpoints_(endpoints), work_(work), kv_(kv), mtp_kv_(mtp_kv),
+      state_(state), io_(io),
       prefill_hidden_(prefill_hidden), prefill_chunk_(prefill_chunk), text_kv_base_(text_kv_base),
       batch_text_kv_(batch_text_kv), batch_mtp_kv_(batch_mtp_kv) {
     if (prefill_chunk_ == 0 ||
@@ -239,6 +241,22 @@ TextContext::TextContext(DeviceContext& ctx, const LoadedModelData& weights, Wor
 }
 
 TextContext::~TextContext() = default;
+
+void TextContext::embed(const Tensor& ids, Tensor& output) {
+    if (endpoints_ != nullptr) {
+        endpoints_->embedding(ids, *embed_, output);
+    } else {
+        ops::embedding(ids, *embed_, output, ctx_.stream);
+    }
+}
+
+void TextContext::score(const Tensor& hidden, const Weight& weight, Tensor& output) {
+    if (endpoints_ != nullptr && (&weight == lm_head_ || &weight == proposal_head_)) {
+        endpoints_->linear(hidden, weight, output);
+    } else {
+        ops::linear(hidden, weight, output, ctx_.stream);
+    }
+}
 
 void TextContext::set_linear_state_slots(std::int32_t current_slot,
                                          std::int32_t turn_checkpoint_slot) {
@@ -340,7 +358,7 @@ void TextContext::mtp_forward_stem(const Tensor& ids, const Tensor& hidden,
         emb = input_embeddings->view({kCfg.hidden, T});
     } else {
         emb = roots.embedding;
-        ops::embedding(flat_ids, *embed_, emb, s);
+        embed(flat_ids, emb);
     }
 
     Tensor e = roots.normalized_embedding;
@@ -555,13 +573,13 @@ void TextContext::proposal_argmax(const Tensor& hidden, Tensor& logits, Tensor& 
     require_tensor_window(logits, DType::BF16, kCfg.vocab, T, "proposal logits");
     if (proposal_head_ != nullptr) {
         Tensor proposal_logits = work_.alloc(DType::BF16, {proposal_head_n_, T});
-        ops::linear(hidden, *proposal_head_, proposal_logits, ctx_.stream);
+        score(hidden, *proposal_head_, proposal_logits);
         ops::argmax(proposal_logits, proposal_tokens, proposal_head_n_, ctx_.stream);
         ops::proposal_remap_token_ids(proposal_tokens, proposal_head_ids_, proposal_head_n_,
                                       ctx_.stream);
     } else {
         Tensor output_logits = matrix_window(logits, T);
-        ops::linear(hidden, *lm_head_, output_logits, ctx_.stream);
+        score(hidden, *lm_head_, output_logits);
         ops::argmax(output_logits, proposal_tokens, kCfg.token_domain, ctx_.stream);
     }
 }
@@ -662,11 +680,11 @@ void TextContext::ordinary_decode_batch(const Tensor& ids, const Tensor& cache_p
         ScopedValue<std::int32_t> width_binding(active_sequence_width_, 1);
 
         Tensor x = work_.alloc(DType::BF16, {kCfg.hidden, batch});
-        ops::embedding(ids, *embed_, x, stream);
+        embed(ids, x);
         NullTap tap;
         run_layers(x, Phase::Verify, tap);
         ops::rmsnorm(x, *final_norm_, kCfg.rms_eps, true, hidden, stream);
-        ops::linear(hidden, *lm_head_, logits, stream);
+        score(hidden, *lm_head_, logits);
     }
     work_.reset();
 }
@@ -714,7 +732,7 @@ void TextContext::target_verify_batch_impl(const Tensor& ids, const Tensor& cach
 
         Tensor x        = work_.alloc(DType::BF16, {kCfg.hidden, columns});
         Tensor flat_ids = ids.view({columns});
-        ops::embedding(flat_ids, *embed_, x, stream);
+        embed(flat_ids, x);
         if constexpr (Tap::enabled) { tap.begin(x); }
         run_layers(x, Phase::Verify, tap);
         if constexpr (requires { tap.capture_positions(cache_positions, stream); }) {
@@ -724,7 +742,7 @@ void TextContext::target_verify_batch_impl(const Tensor& ids, const Tensor& cach
         Tensor flat_logits = logits.view({kCfg.vocab, columns});
         Tensor flat_tokens = target_tokens.view({columns});
         ops::rmsnorm(x, *final_norm_, kCfg.rms_eps, true, flat_hidden, stream);
-        ops::linear(flat_hidden, *lm_head_, flat_logits, stream);
+        score(flat_hidden, *lm_head_, flat_logits);
         ops::argmax(flat_logits, flat_tokens, kCfg.token_domain, stream);
     }
     work_.reset();
@@ -1147,7 +1165,7 @@ TextContext::prefill_impl(std::span<const int> ids, const TextPrefill* text_pref
             ScopedEnvelope scoped_envelope(active_gqa_envelope_, chunk_envelope);
 
             Tensor x = roots.residual;
-            ops::embedding(ids_device, *embed_, x, s);
+            embed(ids_device, x);
             if (!local_scatter_indices.empty()) {
                 Tensor indices_device = roots.scatter_indices;
                 copy_i32(local_scatter_indices.data(), indices_device, s);
@@ -1169,7 +1187,7 @@ TextContext::prefill_impl(std::span<const int> ids, const TextPrefill* text_pref
             if (is_last) {
                 Tensor last_xf = xf.slice(1, len - 1, 1);
                 Tensor logits  = matrix_window(io_.logits, 1);
-                ops::linear(last_xf, *lm_head_, logits, s);
+                score(last_xf, *lm_head_, logits);
                 // Set io_.pos to the bonus token's absolute position (base + T) before picking so
                 // the sampler RNG is keyed by it (prefill purpose keeps it distinct from the first
                 // decode step, which reuses the same io_.pos).
@@ -1221,7 +1239,7 @@ TextContext::prefill_impl(std::span<const int> ids, const TextPrefill* text_pref
                 const Tensor* mtp_input_embeddings_ptr = nullptr;
                 if (multimodal != nullptr) {
                     mtp_input_embeddings = work_.alloc(DType::BF16, {kCfg.hidden, len});
-                    ops::embedding(mtp_ids, *embed_, mtp_input_embeddings, s);
+                    embed(mtp_ids, mtp_input_embeddings);
                     if (vision_chunk.control != nullptr) {
                         const qwen3_6::MtpVisualOverlap overlap = qwen3_6::shifted_visual_overlap(
                             vision_chunk.control->scatter_indices, alignment_tokens, mtp_window);

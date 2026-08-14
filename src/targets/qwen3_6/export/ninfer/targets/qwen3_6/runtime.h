@@ -184,7 +184,7 @@ private:
     template <class V>
     friend std::unique_ptr<Program<V>> create_program(const typename V::ModelView&,
                                                       typename V::WeightsProfile, SequencePlan<V>&&,
-                                                      DeviceContext&);
+                                                      DeviceContext&, DeviceContext*);
 };
 
 template <class Variant>
@@ -196,6 +196,6 @@ template <class Variant>
 [[nodiscard]] std::unique_ptr<Program<Variant>>
 create_program(const typename Variant::ModelView& model,
                typename Variant::WeightsProfile weights_profile, SequencePlan<Variant>&& plan,
-               DeviceContext& device);
+               DeviceContext& device, DeviceContext* endpoint_device = nullptr);
 
 } // namespace ninfer::targets::qwen3_6

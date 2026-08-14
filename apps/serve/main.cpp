@@ -86,6 +86,12 @@ int main(int argc, char** argv) {
                  << " graphs=" << format_bytes(memory.cuda_graph_observed_bytes) << '/'
                  << format_bytes(memory.cuda_graph_allowance_bytes);
         ninfer::serve::write_console_log(ninfer::serve::ConsoleLogLevel::Info, capacity.str());
+        if (memory.endpoint_device) {
+            ninfer::serve::write_console_log(
+                ninfer::serve::ConsoleLogLevel::Info,
+                "endpoint weights on CUDA device " + std::to_string(*memory.endpoint_device) +
+                    ": " + format_bytes(memory.endpoint_weights.used_bytes));
+        }
 
         ninfer::serve::write_console_log(ninfer::serve::ConsoleLogLevel::Info, "warming up...");
         service.warmup();

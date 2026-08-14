@@ -1,10 +1,11 @@
 # NInfer
 
-> Selected checkpoints. Maximum single-GPU inference performance.
+> Selected checkpoints. Native CUDA inference at maximum performance.
 
-NInfer is a from-scratch C++/CUDA inference engine for explicitly registered Qwen checkpoints on a
-single NVIDIA GeForce RTX 5090. It runs text, image, and video prompts through a local CLI or
-OpenAI-/Anthropic-compatible HTTP APIs.
+NInfer is a from-scratch C++/CUDA inference engine for explicitly registered Qwen checkpoints. Its
+ordinary execution profiles target one NVIDIA GeForce RTX 5090; Qwen3.8-27B additionally has an
+exact endpoint-offload profile for an RTX 5070 Ti 16 GB plus RTX 5060 Ti 16 GB. It runs text,
+image, and video prompts through a local CLI or OpenAI-/Anthropic-compatible HTTP APIs.
 
 NInfer deliberately supports a closed set of model artifacts instead of acting as a general model
 runtime:
@@ -25,8 +26,19 @@ and serving routes.
 
 ## Performance
 
-The published measurements currently cover the three Qwen3.6 artifact profiles. Qwen3.8-27B is
-supported by current NInfer builds but is not yet included in the benchmark campaign.
+The published RTX 5090 campaign covers the three Qwen3.6 artifact profiles. A focused Qwen3.8-27B
+measurement for the exact dual-16-GB profile is reported separately below.
+
+### Qwen3.8 dual-16-GB endpoint profile
+
+On an RTX 5070 Ti 16 GB primary plus RTX 5060 Ti 16 GB endpoint, Qwen3.8-27B
+`groupwise-int` generated a deterministic 256-token prose response at **73.9 decode tok/s** with
+MTP3, the optimized draft head, INT8 KV, a 2,048-token capacity, and CUDA Graphs disabled. Draft
+acceptance was **64.9%** and the request committed **2.93 tokens per target round**, versus
+**34.9 decode tok/s** without speculation on the same prompt (**2.12×**). A predictable
+counting workload reached **101.3 decode tok/s** at 100% acceptance; treat that as a best case, not
+general prose throughput. See the [RTX 50 experiment](experiments/rtx50/README.md) for the exact
+placement, startup measurements, and reproduction command.
 
 ### Concurrent MTP3 decode
 
@@ -101,7 +113,9 @@ notes.
 NInfer currently requires:
 
 - 64-bit Linux;
-- NVIDIA GeForce RTX 5090 (`sm_120a`);
+- an `sm_120a` NVIDIA GPU profile: one GeForce RTX 5090 for ordinary execution, or the exact
+  Qwen3.8 endpoint-offload profile using a GeForce RTX 5070 Ti 16 GB primary plus GeForce RTX 5060
+  Ti 16 GB endpoint;
 - NVIDIA driver support for CUDA 13.1 and the CUDA Toolkit 13.1 or newer;
 - CMake 3.28 or newer and a C++20-capable host compiler;
 - `pkg-config`;
@@ -134,8 +148,8 @@ Tests, benchmarks, and maintainer tools are excluded from the default build.
 
 ## Docker
 
-Build the runtime image on a 64-bit Linux host with an RTX 5090, a CUDA 13.1-compatible NVIDIA
-driver, Docker, and the
+Build the runtime image on a 64-bit Linux host with a supported GPU profile, a CUDA 13.1-compatible
+NVIDIA driver, Docker, and the
 [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html).
 
 ```bash
@@ -293,12 +307,15 @@ from one to fifteen.
 
 - Only the four `(model_id, weights_id)` artifact identities listed above are accepted product
   identities.
-- Execution is specialized for one RTX 5090 and one CUDA device.
+- Ordinary execution is specialized for one RTX 5090 and one CUDA device. The exact
+  `qwen3.8-27b/groupwise-int` profile may instead offload embedding/output endpoint weights from an
+  RTX 5070 Ti 16 GB primary to an RTX 5060 Ti 16 GB secondary device.
 - One Engine owns one resident model and supports a startup-fixed capacity of 1–8 active requests.
   Decode-ready requests are compacted at round boundaries and executed in one batched model
   traversal.
-- NInfer does not provide large-scale or preemptive continuous batching, priority/QoS scheduling,
-  multi-GPU execution, CPU/GPU offload, or distributed serving.
+- NInfer does not provide generic multi-GPU execution, layer splitting, tensor parallelism,
+  CPU/GPU offload, distributed serving, large-scale or preemptive continuous batching, or
+  priority/QoS scheduling.
 - `--max-context` is the logical ceiling of each sequence and is configurable up to the registered
   models' native 262,144-token limit. `--kv-capacity N` explicitly sizes the shared Main Text KV
   pool for all active and retained sequences, while `--kv-capacity auto` selects the largest usable

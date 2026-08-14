@@ -76,7 +76,7 @@ std::string usage_text(const char* argv0) {
     return std::string("usage: ") + argv0 +
            " <model.ninfer> (--prompt <text>|--messages <messages.json>)\n"
            "       [--max-context N] [--kv-capacity N|auto] [--prefill-chunk N] [--max-new N]\n"
-           "       [--device N]\n"
+           "       [--device N] [--endpoint-device N]\n"
            "       [--kv-dtype bf16|int8] [--spec mtp|dflash --draft-tokens N]\n"
            "       [--lm-head-draft]\n"
            "       [--temperature F] [--top-p F] [--top-k N] [--min-p F]\n"
@@ -90,6 +90,8 @@ std::string usage_text(const char* argv0) {
            "Structured message content accepts text, image/image_url, and video/video_url parts;\n"
            "media sources may be local paths, HTTP(S) URLs, or base64 data URIs.\n"
            "--vision enables image/video input and loads the fixed Vision GPU allocations.\n"
+           "--endpoint-device moves Qwen3.8 embedding/output weights to a second GPU and "
+           "disables CUDA Graphs.\n"
            "--kv-capacity auto leaves " +
            std::to_string(kDefaultKvCapacityHeadroomBytes / (1024ULL * 1024ULL)) +
            " MiB of sizing headroom.\n"
@@ -129,6 +131,8 @@ Options parse_options(int argc, char** argv) {
             options.prefill_chunk = parse_u32(value(arg), "prefill-chunk");
         } else if (arg == "--device") {
             options.device = parse_device(value(arg));
+        } else if (arg == "--endpoint-device") {
+            options.endpoint_device = parse_device(value(arg));
         } else if (arg == "--kv-dtype") {
             options.kv_cache = parse_kv_cache(value(arg));
         } else if (arg == "--spec") {
@@ -193,6 +197,12 @@ Options parse_options(int argc, char** argv) {
 
     if (!kv_capacity_explicit) {
         options.kv_capacity = KvCapacityPolicy::explicit_capacity(options.max_context);
+    }
+    if (options.endpoint_device) {
+        if (*options.endpoint_device == options.device) {
+            throw std::invalid_argument("--endpoint-device must differ from --device");
+        }
+        options.use_cuda_graph = false;
     }
 
     const bool has_prompt   = !options.prompt.empty();

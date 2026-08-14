@@ -26,6 +26,74 @@ identity automatically:
   --lm-head-draft
 ```
 
+### Qwen3.8 on two 16 GB RTX 50-series GPUs
+
+`qwen3.8-27b/groupwise-int` has one explicit endpoint-offload profile for machines where neither
+card can hold the complete resident Engine. `--device` owns all 64 transformer layers, state, KV,
+MTP, Vision, and scheduling. `--endpoint-device` owns the token embedding, output head, and the
+optional optimized draft head. The devices must be distinct. Existing one-device profiles are
+unchanged when the option is omitted.
+
+```bash
+./build/apps/ninfer-serve models/qwen3_8_27b.ninfer \
+  --host 127.0.0.1 --port 8080 \
+  --device 0 --endpoint-device 1 \
+  --max-context 2048 --kv-capacity 2048 --kv-dtype int8 \
+  --spec mtp --draft-tokens 3 --lm-head-draft
+```
+
+This route is designed for a faster primary card and a slower endpoint card without CUDA peer
+access. It stages represented endpoint inputs and outputs through pinned host memory and therefore
+disables CUDA Graphs automatically. It does not split transformer layers or use tensor
+parallelism. The option is rejected for every artifact identity except
+`qwen3.8-27b/groupwise-int`.
+
+For the repository's Linux build running under Docker Desktop on Windows, expose only the local
+loopback port:
+
+```powershell
+docker run --rm --gpus all -p 127.0.0.1:18080:8080 `
+  -v "${PWD}:/workspace" -v "D:\AiModels\NInfer:/models:ro" `
+  -w /workspace ninfer-rtx50-dev:cuda13.1 `
+  ./build-rtx50-linux/apps/ninfer-serve `
+  /models/qwen3_8_27b.ninfer `
+  --host 0.0.0.0 --port 8080 --device 0 --endpoint-device 1 `
+  --max-context 2048 --kv-capacity 2048 --kv-dtype int8 `
+  --spec mtp --draft-tokens 3 --lm-head-draft `
+  --model-id qwen3.8-27b --api-key local-secret
+```
+
+Clients use base URL `http://127.0.0.1:18080/v1`, model ID `qwen3.8-27b`, and API key
+`local-secret`. NInfer remains the model server: another application can consume this compatible
+endpoint, but it does not make `.ninfer` a GGUF file or load it through that application's native
+runtime.
+
+Verify the process before configuring a graphical client:
+
+```powershell
+$headers = @{ Authorization = "Bearer local-secret" }
+Invoke-RestMethod http://127.0.0.1:18080/v1/models -Headers $headers
+```
+
+### Unsloth Desktop and LM Studio clients
+
+NInfer must remain the process that owns the model and both GPUs. In Unsloth Desktop, open Chat's
+connection settings, add a **Custom** connection, and enter:
+
+- Base URL: `http://127.0.0.1:18080/v1`
+- API key: `local-secret`
+- manual model ID: `qwen3.8-27b`
+
+If Unsloth itself is running in a container, use
+`http://host.docker.internal:18080/v1` instead of `127.0.0.1`. The installed Unsloth Studio custom
+provider uses the OpenAI-compatible Chat Completions and Models routes exposed above.
+
+LM Studio's native model loader cannot load a `.ninfer` artifact. Its Chat UI can consume NInfer
+through the `openai-compat-endpoint` plugin: configure the same base URL, API key, and model ID.
+Without that plugin, use another OpenAI-compatible client or call the endpoint directly. Do not
+load the GGUF in LM Studio at the same time unless enough VRAM remains for both independent model
+processes.
+
 When `--model-id` is omitted, the server advertises and accepts the loaded container's exact
 `identity.model_id`. An explicit `--model-id` remains a public HTTP alias override and does not
 select or alter the artifact.
@@ -426,6 +494,7 @@ curl http://127.0.0.1:8080/v1/models \
 | `--prefill-chunk N` | text-prefill chunk | `1024` |
 | `--log-stats-interval-ms N` | aggregate throughput report interval; `0` disables it | `5000` |
 | `--device N` | CUDA device index | `0` |
+| `--endpoint-device N` | Qwen3.8 vocabulary-endpoint CUDA device; must differ from `--device` and disables CUDA Graphs | unset |
 | `--max-request-mib N` | body-size limit before JSON parsing | `384` |
 | `--request-log-jsonl FILE` | append full-precision server/request records | disabled |
 | `--response-store-max-records N` | maximum locally retained Responses objects | `1024` |

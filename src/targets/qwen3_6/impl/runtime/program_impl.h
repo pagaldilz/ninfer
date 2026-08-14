@@ -179,8 +179,9 @@ void instantiate_graph_family(DecodeGraphFamily& family, const char* label, Devi
 } // namespace
 
 ProgramImplCore::ProgramImplCore(const LoadedModelData& model_in, const SequencePlanImpl& plan,
-                                 DeviceContext& device_in)
-    : model(model_in), device(device_in), capacity(plan.capacity), kv_capacity(plan.kv_capacity),
+                                 DeviceContext& device_in, DeviceContext* endpoint_device)
+    : model(model_in), device(device_in), endpoint_device(endpoint_device),
+      capacity(plan.capacity), kv_capacity(plan.kv_capacity),
       max_concurrency(plan.max_concurrency), prefill_chunk(plan.prefill_chunk),
       draft_window(plan.draft_window), speculative_backend(plan.speculative_backend),
       kv_dtype(plan.kv_dtype), kv_quant_group(plan.kv_quant_group),
@@ -205,6 +206,19 @@ ProgramImplCore::ProgramImplCore(const LoadedModelData& model_in, const Sequence
                       : std::nullopt) {
     if (model.weights_arena == nullptr) {
         throw std::invalid_argument("Qwen3.6 model view has no owning weight arena");
+    }
+    if (model.endpoint_offload != (endpoint_device != nullptr) ||
+        model.endpoint_offload != (model.endpoint_weights_arena != nullptr)) {
+        throw std::invalid_argument(
+            "Qwen3.6 endpoint weights and execution device are inconsistent");
+    }
+    if (model.endpoint_offload) {
+        const std::uint32_t score_columns =
+            max_concurrency * std::max<std::uint32_t>(1, draft_window + 1);
+        endpoints = std::make_unique<qwen3_6::detail::EndpointExecution>(
+            device, *endpoint_device, TextConfig::hidden, TextConfig::output_rows,
+            static_cast<std::int32_t>(prefill_chunk),
+            static_cast<std::int32_t>(score_columns));
     }
     if (model.features != plan.features || model.mtp.has_value() != plan.features.mtp() ||
         model.dflash.has_value() != plan.features.dflash() ||
@@ -1179,6 +1193,7 @@ void ProgramImplCore::prepare_graphs() {
     const auto execution_core = [&] {
         return schedule::ExecutionCore{device,
                                        model,
+                                       endpoints.get(),
                                        work,
                                        decoder->linear_attention,
                                        replay_records ? &*replay_records : nullptr,
@@ -1446,7 +1461,8 @@ void ProgramImplCore::enqueue_dflash_context_append(std::span<const std::uint32_
     ops::prepare_ragged_prefix(dflash->pending_features, lane_tensor, device_starts, device_ends,
                                features, positions, device_counts, device.stream);
 
-    schedule::DFlashAppendContext state{{device, model, work, decoder->linear_attention,
+    schedule::DFlashAppendContext state{{device, model, endpoints.get(), work,
+                                         decoder->linear_attention,
                                          replay_records ? &*replay_records : nullptr, io,
                                          prefill_hidden, prefill_chunk, proposal_head},
                                         *dflash};
@@ -1479,7 +1495,7 @@ runtime::PrefillStepResult ProgramImplCore::advance_prefill(SequenceState& seque
     const auto started                    = Clock::now();
     try {
         schedule::PrefillContext schedule_state{
-            {device, model, work, decoder->linear_attention,
+            {device, model, endpoints.get(), work, decoder->linear_attention,
              replay_records ? &*replay_records : nullptr, io, prefill_hidden, prefill_chunk,
              proposal_head},
             text_kv_view(sequence),
@@ -1740,7 +1756,7 @@ ProgramImplCore::decode_ordinary_batch(std::span<const std::uint32_t> lanes,
         }
 
         schedule::OrdinaryBatchContext schedule_state{
-            {device, model, work, decoder->linear_attention,
+            {device, model, endpoints.get(), work, decoder->linear_attention,
              replay_records ? &*replay_records : nullptr, io, prefill_hidden, prefill_chunk,
              proposal_head},
             decoder->text_kv,
@@ -1871,7 +1887,8 @@ ProgramImplCore::decode_mtp_batch(std::span<const std::uint32_t> lanes,
                                     std::min(capacity, frontier + extent + draft_window));
         }
 
-        schedule::MtpBatchContext schedule_state{{device, model, work, decoder->linear_attention,
+        schedule::MtpBatchContext schedule_state{{device, model, endpoints.get(), work,
+                                                  decoder->linear_attention,
                                                   replay_records ? &*replay_records : nullptr, io,
                                                   prefill_hidden, prefill_chunk, proposal_head},
                                                  decoder->text_kv,
@@ -2032,7 +2049,8 @@ ProgramImplCore::decode_dflash_batch(std::span<const std::uint32_t> lanes,
             materialize_sequence_kv(sequence, frontier + extent + 1U, frontier);
         }
 
-        schedule::DFlashBatchContext schedule_state{{device, model, work, decoder->linear_attention,
+        schedule::DFlashBatchContext schedule_state{{device, model, endpoints.get(), work,
+                                                     decoder->linear_attention,
                                                      replay_records ? &*replay_records : nullptr,
                                                      io, prefill_hidden, prefill_chunk,
                                                      proposal_head},
@@ -2175,11 +2193,21 @@ MemorySummary ProgramImplCore::memory_summary() const noexcept {
     out.cuda_graph_allowance_bytes   = graph_allowance_bytes;
     out.cuda_graph_observed_bytes    = graph_observed_bytes;
     out.kv_payload_bytes             = kv_payload_bytes;
+    if (endpoint_device != nullptr && model.endpoint_weights_arena != nullptr) {
+        out.endpoint_device = endpoint_device->device;
+        DeviceArena& endpoint_weights = *model.endpoint_weights_arena;
+        out.endpoint_weights = ArenaMemorySummary{endpoint_weights.capacity(),
+                                                  endpoint_weights.used(),
+                                                  endpoint_weights.peak_used()};
+    }
     return out;
 }
 
 void ProgramImplCore::reset_memory_peaks() noexcept {
     model.weights_arena->reset_peak();
+    if (model.endpoint_weights_arena != nullptr) {
+        model.endpoint_weights_arena->reset_peak();
+    }
     persistent.reset_peak();
     work.reset_peak();
     workspace_logical_peak_bytes = 0;

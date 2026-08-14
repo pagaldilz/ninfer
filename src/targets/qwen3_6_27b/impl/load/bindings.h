@@ -96,6 +96,7 @@ struct MtpPlan {
 struct BindingPlan {
     qwen3_6::FrontendResourcePlan frontend;
     qwen3_6::StartupFeatures features;
+    bool endpoint_offload = false;
 
     WeightPlan token_embedding;
     std::array<TextLayerPlan, kTextLayers> text_layers;
@@ -118,7 +119,8 @@ struct ArtifactLoadPlan {
 };
 
 ArtifactLoadPlan bind_artifact(artifact::Binder& binder, WeightsProfile weights_profile,
-                               qwen3_6::StartupFeatures features);
+                               qwen3_6::StartupFeatures features,
+                               bool endpoint_offload = false);
 
 struct DensePostMixerPayload {
     Weight gate_up;

@@ -55,6 +55,18 @@ int main() {
     failures += check(resolve_public_model_id(defaults, "artifact-model") == "artifact-model",
                       "artifact model id was not selected by default");
 
+    const ServeOptions dual = parse(
+        {"ninfer-serve", "model.ninfer", "--device", "0", "--endpoint-device", "1"});
+    failures += check(dual.endpoint_device == 1 && !dual.use_cuda_graph,
+                      "--endpoint-device did not select the second GPU and disable CUDA Graphs");
+    bool same_endpoint_rejected = false;
+    try {
+        (void)parse(
+            {"ninfer-serve", "model.ninfer", "--device", "1", "--endpoint-device", "1"});
+    } catch (const std::invalid_argument&) { same_endpoint_rejected = true; }
+    failures += check(same_endpoint_rejected,
+                      "identical primary and endpoint devices were accepted");
+
     const ServeOptions model_alias =
         parse({"ninfer-serve", "model.ninfer", "--model-id", "deployment-alias"});
     failures +=
@@ -169,6 +181,9 @@ int main() {
               "serve help omits --log-stats-interval-ms");
     failures += check(serve_usage_text("ninfer-serve").find("--kv-capacity") != std::string::npos,
                       "serve help omits --kv-capacity");
+    failures += check(serve_usage_text("ninfer-serve").find("--endpoint-device") !=
+                          std::string::npos,
+                      "serve help omits --endpoint-device");
     failures += check(serve_usage_text("ninfer-serve").find("--response-store-max-mib") !=
                           std::string::npos,
                       "serve help omits Responses store limits");

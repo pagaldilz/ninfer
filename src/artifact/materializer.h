@@ -21,7 +21,9 @@ struct LoadProgress {
 struct MaterializationStats {
     std::uint64_t file_bytes              = 0;
     std::uint64_t h2d_bytes               = 0;
+    std::uint64_t secondary_h2d_bytes     = 0;
     std::uint64_t device_capacity_bytes   = 0;
+    std::uint64_t secondary_device_capacity_bytes = 0;
     std::uint64_t retained_resource_bytes = 0;
     std::uint64_t peak_staging_bytes      = 0;
     std::size_t tensor_count              = 0;
@@ -45,10 +47,11 @@ public:
     const MaterializationStats& stats() const noexcept { return stats_; }
 
     DeviceArena& device_arena();
+    DeviceArena& device_arena(DevicePartition partition);
 
 private:
     friend MaterializedArtifact materialize(const Reader&, const MaterializationPlan&,
-                                            DeviceContext&, LoadProgress*);
+                                            DeviceContext&, DeviceContext*, LoadProgress*);
 
     struct ObjectStorage {
         void* device = nullptr;
@@ -56,11 +59,18 @@ private:
     };
 
     std::unique_ptr<DeviceArena> device_arena_;
+    std::unique_ptr<DeviceArena> secondary_device_arena_;
     std::vector<ObjectStorage> objects_;
     MaterializationStats stats_;
 };
 
 MaterializedArtifact materialize(const Reader& reader, const MaterializationPlan& plan,
-                                 DeviceContext& device, LoadProgress* progress = nullptr);
+                                 DeviceContext& device, DeviceContext* secondary_device,
+                                 LoadProgress* progress);
+
+inline MaterializedArtifact materialize(const Reader& reader, const MaterializationPlan& plan,
+                                        DeviceContext& device, LoadProgress* progress = nullptr) {
+    return materialize(reader, plan, device, nullptr, progress);
+}
 
 } // namespace ninfer::artifact

@@ -118,7 +118,12 @@ int DeviceContext::sm() const noexcept { return props.major * 10 + props.minor; 
 
 std::size_t DeviceContext::total_vram() const noexcept { return props.totalGlobalMem; }
 
-void DeviceContext::synchronize() const { CUDA_CHECK(cudaStreamSynchronize(stream)); }
+void DeviceContext::activate() const { CUDA_CHECK(cudaSetDevice(device)); }
+
+void DeviceContext::synchronize() const {
+    activate();
+    CUDA_CHECK(cudaStreamSynchronize(stream));
+}
 
 CudaEventTimer::CudaEventTimer(const DeviceContext& ctx) : stream_(ctx.stream) {
     cudaError_t err = cudaSetDevice(ctx.device);

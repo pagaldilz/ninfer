@@ -42,6 +42,12 @@ GPU residency is frozen when the Engine starts:
   request-transient allocation;
 - `--vision` loads those allocations and enables image/video input.
 
+For `qwen3.8-27b/groupwise-int`, `--endpoint-device N` can place the token embedding, output head,
+and optional optimized draft head on a second CUDA device. The primary `--device` continues to own
+all transformer execution, state, KV, MTP, and Vision. The devices must differ and CUDA Graphs are
+disabled automatically because the exact dual-device route uses pinned-host staging on systems
+without CUDA peer access. Other artifact identities reject this option.
+
 The complete `.ninfer` inventory is still validated. These choices are not lazy loading: a
 text-only Engine rejects media and cannot enable Vision later. DFlash and Vision are mutually
 exclusive. The default speculative and Vision settings produce the smallest resident profile.
@@ -137,6 +143,7 @@ measured recommendation rather than a semantic limit.
 | `--prefill-chunk N` | positive text-prefill chunk, in multiples of 128 | `1024` |
 | `--max-new N` | requested output-token limit | `128` |
 | `--device N` | CUDA device index | `0` |
+| `--endpoint-device N` | Qwen3.8 vocabulary-endpoint CUDA device; disables CUDA Graphs | unset |
 | `--kv-dtype bf16\|int8` | KV-cache storage | `bf16` |
 | `--spec mtp\|dflash` | speculative backend | off |
 | `--draft-tokens N` | MTP `1..5`; DFlash `1..15` | unset |

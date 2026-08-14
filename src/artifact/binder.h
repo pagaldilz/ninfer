@@ -12,7 +12,13 @@ namespace ninfer::artifact {
 
 enum class TensorPlacement : std::uint8_t {
     Device,
+    SecondaryDevice,
     ValidateOnly,
+};
+
+enum class DevicePartition : std::uint8_t {
+    Primary,
+    Secondary,
 };
 
 struct ObjectHandle {
@@ -24,6 +30,7 @@ struct DeviceMaterialization {
     std::uint64_t offset    = 0;
     std::uint64_t bytes     = 0;
     std::uint64_t alignment = 0;
+    DevicePartition partition = DevicePartition::Primary;
 };
 
 struct HostMaterialization {
@@ -33,6 +40,7 @@ struct HostMaterialization {
 struct MaterializationPlan {
     std::size_t object_count            = 0;
     std::uint64_t device_capacity_bytes = 0;
+    std::uint64_t secondary_device_capacity_bytes = 0;
     std::vector<DeviceMaterialization> device_objects;
     std::vector<HostMaterialization> host_objects;
 };
@@ -47,7 +55,8 @@ public:
 
     const ObjectDescriptor& descriptor(ObjectHandle handle) const;
     PayloadSpan payload(ObjectHandle handle) const;
-    void materialize_on_device(ObjectHandle handle);
+    void materialize_on_device(ObjectHandle handle,
+                               DevicePartition partition = DevicePartition::Primary);
     void retain_on_host(ObjectHandle handle);
     void validate_only(ObjectHandle handle);
     MaterializationPlan finish();

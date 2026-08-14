@@ -70,6 +70,8 @@ struct LoadProgress {
 struct EngineOptions {
     std::filesystem::path artifact_path;
     int device                         = 0;
+    // Optional Qwen3.8 endpoint-weight device. Transformer execution remains on `device`.
+    std::optional<int> endpoint_device;
     std::uint32_t max_context          = 2048; // Exact logical ceiling of each request.
     KvCapacityPolicy kv_capacity       = KvCapacityPolicy::explicit_capacity(2048);
     std::uint32_t max_concurrency      = 1;
@@ -393,6 +395,8 @@ struct MemorySummary {
     std::size_t cuda_graph_allowance_bytes        = 0;
     std::size_t cuda_graph_observed_bytes         = 0;
     std::size_t kv_payload_bytes                  = 0;
+    std::optional<int> endpoint_device;
+    ArenaMemorySummary endpoint_weights;
 };
 
 // Monotonic execution counters plus one boundary-consistent scheduler snapshot. Consumers derive
@@ -422,6 +426,7 @@ struct LoadSummary {
     std::uint64_t peak_staging_bytes   = 0;
     std::size_t tensor_count           = 0;
     std::size_t resource_count         = 0;
+    std::uint64_t endpoint_host_to_device_bytes = 0;
 };
 
 } // namespace ninfer

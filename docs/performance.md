@@ -1,4 +1,4 @@
-# Single-GPU serving performance
+# Serving performance
 
 Tested Git revisions:
 
@@ -21,12 +21,42 @@ NVIDIA GeForce RTX 5090. They cover long-context prefill and baseline decode wit
 decoding disabled, plus long-reasoning and cross-scenario decode with MTP and DFlash. The 27B
 results report its `groupwise-int` and `nvfp4` weight profiles separately. The concurrent
 decode-saturation campaign measures the same three Qwen3.6 artifact profiles at C=1, 2, 4, and 8.
-Qwen3.8-27B is supported by current NInfer builds but is not included in this published campaign.
+Qwen3.8-27B has a separate focused measurement on the exact dual-16-GB endpoint profile below; it
+is not mixed into the RTX 5090 campaign tables.
 
 The single-request corpus requests were submitted serially to a persistent `ninfer-serve` process
 over the loopback OpenAI-compatible HTTP endpoint. Each reported corpus fixture used five fixed
 seeds. Values are arithmetic mean ± sample standard deviation, and server warm-up completes before
 the measured requests. The concurrent campaign has its own sustained-wave method below.
+
+## Qwen3.8 RTX 5070 Ti + RTX 5060 Ti endpoint profile
+
+This focused qualification used a GeForce RTX 5070 Ti 16 GB primary and GeForce RTX 5060 Ti 16 GB
+endpoint under Docker Desktop/WSL2, CUDA Toolkit 13.1.80, and NVIDIA driver 610.88. The registered
+Qwen3.8-27B `groupwise-int` `.ninfer` artifact ran with one active request, INT8 group-64 KV,
+greedy decoding, thinking disabled, and CUDA Graphs disabled by the pinned-host endpoint bridge.
+Each request generated 256 tokens after server warm-up.
+
+| Workload | Runtime profile | Decode tok/s | TTFT | Wall | MTP acceptance | Tokens/round |
+|---|---|---:|---:|---:|---:|---:|
+| Natural-language prose | MTP0, 4,096-token capacity | 34.9 | 651 ms | 7.96 s | n/a | 1.00 |
+| Natural-language prose | MTP3 optimized, 2,048-token capacity | 73.9 | 545 ms | 4.00 s | 64.9% | 2.93 |
+| Counting sequence | MTP3 optimized, 2,048-token capacity | 101.3 | 1,061 ms | 3.58 s | 100.0% | 3.98 |
+
+The prose pair measures the same deterministic response: MTP3 improves decode throughput by
+**2.12×**. The 101.3 tok/s row is a predictable-output best case, where all drafted tokens were
+accepted. The server computes decode
+throughput from unrounded phase timing as `(completion_tokens - 1) / decode_seconds`; HTTP setup and
+prefill are reported separately through TTFT and wall time.
+
+The primary/endpoint weight arenas were 13.824/2.848 GiB for the MTP3 profile. A 2,048-token
+capacity left 293 MiB free on the primary after startup, so this is a deliberately bounded profile,
+not evidence for large context on a 16 GB primary. Loading the same 15.92 GiB MTP0 payload took
+258.257 seconds from the local `H:` SATA HDD and 105.437 seconds from an SHA-256-verified `D:` NVMe
+copy, a 2.45× startup improvement. Disk placement affects startup, not resident decode.
+
+Exact placement, native-kernel microbenchmarks, the LM Studio GGUF control, and the reproduction
+command are in the [RTX 50 experiment](../experiments/rtx50/README.md).
 
 ## Single-request serving performance method
 

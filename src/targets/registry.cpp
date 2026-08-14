@@ -53,13 +53,25 @@ void validate_options(const EngineOptions& options) {
     if (options.max_pending_requests == 0 || options.pending_timeout_ms == 0) {
         throw std::invalid_argument("Engine pending request capacity and timeout must be nonzero");
     }
+    if (options.endpoint_device) {
+        if (*options.endpoint_device == options.device) {
+            throw std::invalid_argument(
+                "Engine endpoint_device must differ from the primary device");
+        }
+        if (options.use_cuda_graph) {
+            throw std::invalid_argument(
+                "Engine endpoint_device requires use_cuda_graph=false");
+        }
+    }
 }
 
 artifact::LoadProgress artifact_progress(const LoadProgress& progress) {
     return artifact::LoadProgress{.callback = progress.callback};
 }
 
-std::size_t runtime_bytes_after_planned_weights(std::uint64_t weight_bytes) {
+std::size_t runtime_bytes_after_planned_weights(DeviceContext& device,
+                                                std::uint64_t weight_bytes) {
+    device.activate();
     std::size_t free_bytes  = 0;
     std::size_t total_bytes = 0;
     CUDA_CHECK(cudaMemGetInfo(&free_bytes, &total_bytes));
@@ -72,7 +84,8 @@ std::size_t runtime_bytes_after_planned_weights(std::uint64_t weight_bytes) {
     return free_bytes - static_cast<std::size_t>(weight_bytes);
 }
 
-std::size_t current_free_device_bytes() {
+std::size_t current_free_device_bytes(DeviceContext& device) {
+    device.activate();
     std::size_t free_bytes  = 0;
     std::size_t total_bytes = 0;
     CUDA_CHECK(cudaMemGetInfo(&free_bytes, &total_bytes));
@@ -81,7 +94,8 @@ std::size_t current_free_device_bytes() {
 
 template <class Target, class Loaded, class Instance>
 ConstructedTarget construct_registered(const EngineOptions& options, DeviceContext& device,
-                                       artifact::Reader& reader, Clock::time_point load_start,
+                                       DeviceContext* endpoint_device, artifact::Reader& reader,
+                                       Clock::time_point load_start,
                                        std::string_view target_key) {
     const auto& identity                          = reader.identity();
     const auto weights_profile                    = Target::resolve_weights(identity);
@@ -92,18 +106,25 @@ ConstructedTarget construct_registered(const EngineOptions& options, DeviceConte
     auto sequence_planner = Target::make_sequence_planner(device, options, weights_profile);
     const runtime::SequenceCapacityCurve curve = sequence_planner.capacity_curve();
     const std::size_t preflight_runtime_bytes =
-        runtime_bytes_after_planned_weights(load_plan.materialization().device_capacity_bytes);
+        runtime_bytes_after_planned_weights(device,
+                                            load_plan.materialization().device_capacity_bytes);
     (void)runtime::resolve_kv_capacity(options.kv_capacity, curve, preflight_runtime_bytes);
+    if (endpoint_device != nullptr) {
+        (void)runtime_bytes_after_planned_weights(
+            *endpoint_device, load_plan.materialization().secondary_device_capacity_bytes);
+    }
 
     auto progress     = artifact_progress(options.load_progress);
     auto materialized = artifact::materialize(reader, load_plan.materialization(), device,
+                                              endpoint_device,
                                               progress.callback ? &progress : nullptr);
     const artifact::MaterializationStats stats = materialized.stats();
 
     auto model = Target::construct_loaded_model(std::move(load_plan), std::move(materialized));
     device.synchronize();
     runtime::KvCapacityResolution capacity_resolution =
-        runtime::resolve_kv_capacity(options.kv_capacity, curve, current_free_device_bytes());
+        runtime::resolve_kv_capacity(options.kv_capacity, curve,
+                                     current_free_device_bytes(device));
     auto sequence_plan = std::move(sequence_planner).finalize(capacity_resolution.main_page_groups);
     if (sequence_plan.device_reservation_bytes() != capacity_resolution.runtime_reservation_bytes ||
         sequence_plan.kv_capacity() != capacity_resolution.resolved_tokens) {
@@ -111,9 +132,10 @@ ConstructedTarget construct_registered(const EngineOptions& options, DeviceConte
     }
     auto loaded   = std::make_unique<Loaded>(std::move(model));
     auto instance = std::make_unique<Instance>(std::move(loaded), capacity_resolution,
-                                               std::move(sequence_plan), device);
+                                               std::move(sequence_plan), device, endpoint_device);
     device.synchronize();
-    instance->kv_capacity_resolution.available_after_startup_bytes = current_free_device_bytes();
+    instance->kv_capacity_resolution.available_after_startup_bytes =
+        current_free_device_bytes(device);
 
     LoadSummary summary;
     summary.target               = std::string(target_key);
@@ -126,6 +148,7 @@ ConstructedTarget construct_registered(const EngineOptions& options, DeviceConte
     summary.peak_staging_bytes   = stats.peak_staging_bytes;
     summary.tensor_count         = stats.tensor_count;
     summary.resource_count       = stats.resource_count;
+    summary.endpoint_host_to_device_bytes = stats.secondary_h2d_bytes;
     return ConstructedTarget{.active            = ActiveTarget(std::move(instance)),
                              .load              = std::move(summary),
                              .sampling_defaults = sampling_defaults};
@@ -141,11 +164,13 @@ LoadedQwen3_6_27B::~LoadedQwen3_6_27B() = default;
 Qwen3_6_27BInstance::Qwen3_6_27BInstance(std::unique_ptr<LoadedQwen3_6_27B> stable_loaded,
                                          runtime::KvCapacityResolution resolution,
                                          Qwen3_6_27B::SequencePlan sequence_plan,
-                                         DeviceContext& device)
+                                         DeviceContext& device,
+                                         DeviceContext* endpoint_device)
     : loaded(std::move(stable_loaded)), kv_capacity_resolution(resolution),
       request_memory(device, sequence_plan.request_transient_capacity_bytes()),
       capacity(sequence_plan.capacity()),
-      program(Qwen3_6_27B::create_program(*loaded->model, std::move(sequence_plan), device)) {}
+      program(Qwen3_6_27B::create_program(*loaded->model, std::move(sequence_plan), device,
+                                         endpoint_device)) {}
 
 Qwen3_6_27BInstance::~Qwen3_6_27BInstance() = default;
 
@@ -158,31 +183,42 @@ LoadedQwen3_6_35BA3B::~LoadedQwen3_6_35BA3B() = default;
 Qwen3_6_35BA3BInstance::Qwen3_6_35BA3BInstance(std::unique_ptr<LoadedQwen3_6_35BA3B> stable_loaded,
                                                runtime::KvCapacityResolution resolution,
                                                Qwen3_6_35BA3B::SequencePlan sequence_plan,
-                                               DeviceContext& device)
+                                               DeviceContext& device,
+                                               DeviceContext* endpoint_device)
     : loaded(std::move(stable_loaded)), kv_capacity_resolution(resolution),
       request_memory(device, sequence_plan.request_transient_capacity_bytes()),
       capacity(sequence_plan.capacity()),
-      program(Qwen3_6_35BA3B::create_program(*loaded->model, std::move(sequence_plan), device)) {}
+      program(Qwen3_6_35BA3B::create_program(*loaded->model, std::move(sequence_plan), device,
+                                            endpoint_device)) {}
 
 Qwen3_6_35BA3BInstance::~Qwen3_6_35BA3BInstance() = default;
 
-ConstructedTarget construct_target(const EngineOptions& options, DeviceContext& device) {
+ConstructedTarget construct_target(const EngineOptions& options, DeviceContext& device,
+                                   DeviceContext* endpoint_device) {
     validate_options(options);
     const auto load_start = Clock::now();
 
     artifact::Reader reader(options.artifact_path);
     const auto& identity = reader.identity();
+    if (endpoint_device != nullptr &&
+        (identity.model_id != Qwen3_6_27B::qwen3_8_model_id ||
+         identity.weights_id != "groupwise-int")) {
+        throw std::invalid_argument(
+            "endpoint_device is supported only for qwen3.8-27b/groupwise-int");
+    }
     if (identity.model_id == Qwen3_6_27B::model_id) {
         return construct_registered<Qwen3_6_27B, LoadedQwen3_6_27B, Qwen3_6_27BInstance>(
-            options, device, reader, load_start, Qwen3_6_27B::target_key);
+            options, device, endpoint_device, reader, load_start, Qwen3_6_27B::target_key);
     }
     if (identity.model_id == Qwen3_6_27B::qwen3_8_model_id) {
         return construct_registered<Qwen3_6_27B, LoadedQwen3_6_27B, Qwen3_6_27BInstance>(
-            options, device, reader, load_start, Qwen3_6_27B::qwen3_8_target_key);
+            options, device, endpoint_device, reader, load_start,
+            Qwen3_6_27B::qwen3_8_target_key);
     }
     if (identity.model_id == Qwen3_6_35BA3B::model_id) {
         return construct_registered<Qwen3_6_35BA3B, LoadedQwen3_6_35BA3B, Qwen3_6_35BA3BInstance>(
-            options, device, reader, load_start, Qwen3_6_35BA3B::target_key);
+            options, device, endpoint_device, reader, load_start,
+            Qwen3_6_35BA3B::target_key);
     }
     throw std::runtime_error("artifact identity '" + identity.model_id + "/" + identity.weights_id +
                              "' has no registered target for this device");

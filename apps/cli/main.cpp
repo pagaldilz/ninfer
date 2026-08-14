@@ -146,6 +146,10 @@ void print_load_summary(const ninfer::LoadSummary& load, double wall_seconds) {
     print_metric("weights", load.weights_id);
     print_metric("artifact file read", format_bytes(load.artifact_bytes_read));
     print_metric("weight H2D", format_bytes(load.host_to_device_bytes));
+    if (load.endpoint_host_to_device_bytes != 0) {
+        print_metric("endpoint weight H2D",
+                     format_bytes(load.endpoint_host_to_device_bytes));
+    }
     print_metric("pinned staging peak", format_bytes(load.peak_staging_bytes));
     print_metric("tensors/resources",
                  std::to_string(load.tensor_count) + " / " + std::to_string(load.resource_count));
@@ -180,6 +184,10 @@ void print_generation_summary(const ninfer::GenerationResult& result,
     const std::uint64_t reserved = static_cast<std::uint64_t>(memory.weights.capacity_bytes) +
                                    memory.runtime_reservation_bytes;
     print_metric("device", std::to_string(memory.device));
+    if (memory.endpoint_device) {
+        print_metric("endpoint device", std::to_string(*memory.endpoint_device));
+        print_metric("endpoint gpu weights used", format_arena_used(memory.endpoint_weights));
+    }
     print_metric("max context", std::to_string(memory.max_context));
     print_metric("KV capacity policy", format_kv_capacity_mode(memory.kv_capacity_mode));
     print_metric("KV capacity", std::to_string(memory.kv_capacity));
@@ -259,6 +267,7 @@ int main(int argc, char** argv) {
         ninfer::EngineOptions engine_options;
         engine_options.artifact_path  = cli.artifact_path;
         engine_options.device         = cli.device;
+        engine_options.endpoint_device = cli.endpoint_device;
         engine_options.max_context    = cli.max_context;
         engine_options.kv_capacity    = cli.kv_capacity;
         engine_options.prefill_chunk  = cli.prefill_chunk;
