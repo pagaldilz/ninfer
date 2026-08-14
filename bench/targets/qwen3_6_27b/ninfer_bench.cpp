@@ -93,6 +93,7 @@ ninfer::bench::RepTiming run_repetition(ninfer::Engine& engine,
     timing.timings                 = generated.timings;
     timing.speculative             = std::move(generated.speculative);
     timing.generated_output_tokens = expected;
+    timing.generated_token_ids     = std::move(generated.generated_token_ids);
     return timing;
 }
 
@@ -155,6 +156,7 @@ int main(int argc, char** argv) {
         engine_options.speculative.draft_tokens  = options.mtp_draft_tokens;
         engine_options.speculative.proposal_head = options.proposal_head;
         engine_options.use_cuda_graph            = options.use_cuda_graph;
+        engine_options.enable_vision             = !options.text_only;
 
         ninfer::bench::BenchEnvironment env;
         env.artifact_path            = options.artifact_path;

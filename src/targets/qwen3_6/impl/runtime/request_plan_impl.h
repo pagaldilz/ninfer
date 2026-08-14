@@ -79,6 +79,9 @@ RequestPlan ProgramImplCore::plan_request(const PreparedPromptData& prompt,
     if (prompt.has_media() != !prompt.patches.empty()) {
         throw std::invalid_argument("prepared prompt media payload is incomplete");
     }
+    if (prompt.has_media() && !enable_vision) {
+        throw std::invalid_argument("vision input is disabled for this Engine instance");
+    }
     validate_sampling(options.sampling);
 
     auto plan                             = std::make_unique<RequestPlanImpl>();

@@ -1,13 +1,13 @@
 # NInfer Persistent Tensor Numeric Formats
 
-This reference defines the seven persistent numeric tensor formats accepted by current `.ninfer`
+This reference defines the eight persistent numeric tensor formats accepted by current `.ninfer`
 artifacts: their logical words, grouped quantization semantics, canonical reference encoder, and
 conformance boundaries. Container framing, physical byte layouts, checkpoint assignment, kernels,
 and runtime-state codecs are defined separately.
 
 ## 1. Registered formats
 
-NInfer starts with exactly seven persistent numeric tensor formats in two categories.
+NInfer starts with exactly eight persistent numeric tensor formats in two categories.
 
 Direct scalar formats preserve one logical scalar word per tensor element:
 
@@ -21,6 +21,7 @@ Grouped quantized-weight formats preserve signed codes plus one scale per logica
 
 | Canonical name | Code width | Group size | Legal signed codes | Scale | Full-group logical bits/weight |
 |---|---:|---:|---:|---|---:|
+| `Q3G64_F16S` | 3 | 64 | `[-4, 3]` | one binary16 scale/group | 3.25 |
 | `Q4G64_F16S` | 4 | 64 | `[-8, 7]` | one binary16 scale/group | 4.25 |
 | `Q5G64_F16S` | 5 | 64 | `[-16, 15]` | one binary16 scale/group | 5.25 |
 | `Q6G64_F16S` | 6 | 64 | `[-32, 31]` | one binary16 scale/group | 6.25 |
@@ -29,7 +30,7 @@ Grouped quantized-weight formats preserve signed codes plus one scale per logica
 This is a closed registry, not a template from which arbitrary scalar types, bit widths, and group
 sizes may be constructed. In particular, `FP16`, `I64`, `Q4G32_F16S`, `Q6G128_F16S`, and
 `W8G64_F16S` do not become valid merely because their components look familiar. The use of a
-binary16 scale inside the four quantized formats does not register `FP16` as a direct tensor format.
+binary16 scale inside the five quantized formats does not register `FP16` as a direct tensor format.
 
 NInfer does not reserve entries for hypothetical formats. A future format is added only for a real
 selected checkpoint target, after its numerical contract, cited upstream quality evidence where
@@ -38,7 +39,7 @@ known. Registry membership
 means that a logical representation is allowed; it does not imply that every tensor role, operator,
 layout, shape, checkpoint, or GPU can consume it.
 
-The design deliberately preserves the currently used group sizes. Q4, Q5, and Q6 share one G64
+The design deliberately preserves the currently used group sizes. Q3, Q4, Q5, and Q6 share one G64
 group geometry, allowing their converter, codec, and kernel structures to share the same grouping
 model. W8 retains the single implemented G32 geometry. The registered Qwen3.6-27B target provides
 the current implementation evidence for these choices. These are accepted project geometries, not
@@ -81,7 +82,7 @@ A **quantization scheme** defines only the persistent logical representation of 
 - the validity rules for codes and scales;
 - the mathematical reconstruction of each represented weight.
 
-The four canonical names above identify schemes in this sense. Their meanings are immutable: a
+The five canonical names above identify schemes in this sense. Their meanings are immutable: a
 consumer must not infer a different zero point, scale geometry, code range, or reconstruction rule
 from context.
 
@@ -129,7 +130,7 @@ One format may have more than one deliberately supported layout, but every layou
 exactly the same direct words or logical codes and scales. The currently registered layouts are
 `contiguous-le-v1` for direct words and `row-split-k128-v1` for grouped formats. Their byte order,
 plane packing, 128-element K padding, and alignment rules belong to the layout registry, not to these
-seven numeric formats.
+eight numeric formats.
 
 ### 2.7 Compute profile and kernel support
 
@@ -243,7 +244,7 @@ Q4G64_F16S
 spelling for the signed 8-bit weight path. The different leading letter does not imply activation
 quantization or a generic family distinction beyond the exact rules in this document.
 
-All seven names are identifiers, not a grammar. A parser must compare a name against this closed
+All eight names are identifiers, not a grammar. A parser must compare a name against this closed
 registry; it must not accept an unknown combination by splitting a name into components.
 Abbreviations such as `Q4`, `Q5`, `Q6`, `W8G32`, and `INT32` may be used in explanatory prose only.
 
@@ -585,7 +586,7 @@ meanings defined here.
 
 ## 9. Checkpoint and model boundary
 
-This registry does not say where any of the seven formats are used. A checkpoint numeric-format
+This registry does not say where any of the eight formats are used. A checkpoint numeric-format
 document must separately define, for every persisted source tensor or derived tensor:
 
 - its source checkpoint identity and source tensor or derivation;
@@ -612,7 +613,7 @@ The first registry contains no implicit or reserved support for:
 
 - other direct scalar types, including `FP16`, `FP64`, signed widths other than `I32`, and unsigned
   integers;
-- other integer widths, including Q2 and Q3;
+- other integer widths, including Q2 and Q7;
 - alternate group sizes for the four accepted code widths;
 - asymmetric or affine quantization with zero points;
 - per-channel schemes disguised as an arbitrary group size;

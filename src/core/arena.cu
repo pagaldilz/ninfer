@@ -3,7 +3,11 @@
 #include <cuda_runtime.h>
 
 #include <cstdio>
+#include <cstdlib>
 #include <limits>
+#if defined(_WIN32)
+#include <malloc.h>
+#endif
 #include <new>
 #include <stdexcept>
 #include <string>
@@ -49,6 +53,16 @@ void free_pinned(void*& ptr) noexcept {
         log_cuda_error("cudaFreeHost", cudaFreeHost(ptr));
         ptr = nullptr;
     }
+}
+
+void free_aligned_host(void*& ptr) noexcept {
+    if (ptr == nullptr) { return; }
+#if defined(_WIN32)
+    _aligned_free(ptr);
+#else
+    std::free(ptr);
+#endif
+    ptr = nullptr;
 }
 
 } // namespace
@@ -204,5 +218,45 @@ PinnedHostBuffer& PinnedHostBuffer::operator=(PinnedHostBuffer&& other) noexcept
 void* PinnedHostBuffer::data() const noexcept { return data_; }
 
 std::size_t PinnedHostBuffer::size() const noexcept { return size_; }
+
+AlignedHostBuffer::AlignedHostBuffer(std::size_t size_bytes, std::size_t alignment) {
+    if (size_bytes == 0) { throw std::invalid_argument("AlignedHostBuffer size must be nonzero"); }
+    if (!is_power_of_two(alignment) || alignment < alignof(void*)) {
+        throw std::invalid_argument("AlignedHostBuffer alignment must be a valid power of two");
+    }
+#if defined(_WIN32)
+    data_ = _aligned_malloc(size_bytes, alignment);
+#else
+    if (size_bytes > std::numeric_limits<std::size_t>::max() - (alignment - 1)) {
+        throw std::overflow_error("AlignedHostBuffer allocation size overflows");
+    }
+    const std::size_t rounded = (size_bytes + alignment - 1) / alignment * alignment;
+    data_                     = std::aligned_alloc(alignment, rounded);
+#endif
+    if (data_ == nullptr) { throw std::bad_alloc(); }
+    size_ = size_bytes;
+}
+
+AlignedHostBuffer::~AlignedHostBuffer() { free_aligned_host(data_); }
+
+AlignedHostBuffer::AlignedHostBuffer(AlignedHostBuffer&& other) noexcept
+    : data_(other.data_), size_(other.size_) {
+    other.data_ = nullptr;
+    other.size_ = 0;
+}
+
+AlignedHostBuffer& AlignedHostBuffer::operator=(AlignedHostBuffer&& other) noexcept {
+    if (this == &other) { return *this; }
+    free_aligned_host(data_);
+    data_       = other.data_;
+    size_       = other.size_;
+    other.data_ = nullptr;
+    other.size_ = 0;
+    return *this;
+}
+
+void* AlignedHostBuffer::data() const noexcept { return data_; }
+
+std::size_t AlignedHostBuffer::size() const noexcept { return size_; }
 
 } // namespace ninfer

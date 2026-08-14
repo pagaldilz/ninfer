@@ -103,6 +103,8 @@ QuantGeometry quant_geometry(QType qtype) {
         return {64, 32, 16};
     case QType::W8G32_F16S:
         return {32, 32, 0};
+    case QType::Q3G64_F16S:
+        return {64, 26, 0};
     default:
         throw std::invalid_argument("sparse_moe: unsupported quantized weight format");
     }
@@ -113,6 +115,18 @@ void require_quantized(const Weight& weight, std::int32_t n, std::int32_t k, con
     require_matrix_metadata(weight, n, k, name);
     const QuantGeometry geometry       = quant_geometry(weight.qtype);
     const std::size_t groups           = static_cast<std::size_t>(n) * k / geometry.group_size;
+    if (weight.qtype == QType::Q3G64_F16S) {
+        const std::size_t payload_bytes = groups * geometry.code_bytes_per_group;
+        if (weight.layout != QuantLayout::GroupInterleaved ||
+            weight.scale_dtype != DType::FP16 || weight.group_size != 64 || weight.group != 64 ||
+            weight.qdata == nullptr || weight.qhigh != nullptr || weight.scales != nullptr ||
+            weight.payload_bytes < payload_bytes || !aligned_to(weight.qdata, 16)) {
+            throw std::invalid_argument(std::string("sparse_moe: invalid group-interleaved ") +
+                                        name);
+        }
+        ranges.push_back(address_range(weight.qdata, payload_bytes, name));
+        return;
+    }
     const std::size_t code_bytes       = groups * geometry.code_bytes_per_group;
     const std::size_t high_bytes       = groups * geometry.high_bytes_per_group;
     const std::size_t scale_bytes      = groups * 2;
@@ -138,14 +152,16 @@ void require_quantized(const Weight& weight, std::int32_t n, std::int32_t k, con
 
 void validate_weights(const SparseMoeWeights& weights, std::vector<AddressRange>& ranges) {
     require_router(weights.router_shared_gate, ranges);
-    if (weights.routed_gate_up.qtype != QType::Q4G64_F16S &&
+    if (weights.routed_gate_up.qtype != QType::Q3G64_F16S &&
+        weights.routed_gate_up.qtype != QType::Q4G64_F16S &&
         weights.routed_gate_up.qtype != QType::W8G32_F16S) {
-        throw std::invalid_argument("sparse_moe: routed_gate_up must be Q4 or W8");
+        throw std::invalid_argument("sparse_moe: routed_gate_up must be Q3, Q4, or W8");
     }
-    if (weights.routed_down.qtype != QType::Q5G64_F16S &&
+    if (weights.routed_down.qtype != QType::Q4G64_F16S &&
+        weights.routed_down.qtype != QType::Q5G64_F16S &&
         weights.routed_down.qtype != QType::Q6G64_F16S &&
         weights.routed_down.qtype != QType::W8G32_F16S) {
-        throw std::invalid_argument("sparse_moe: routed_down must be Q5, Q6, or W8");
+        throw std::invalid_argument("sparse_moe: routed_down must be Q4, Q5, Q6, or W8");
     }
     if (weights.shared_gate_up.qtype != QType::W8G32_F16S ||
         weights.shared_down.qtype != QType::W8G32_F16S) {

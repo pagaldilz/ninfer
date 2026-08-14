@@ -78,6 +78,8 @@ std::string_view format_name(NumericFormat format) noexcept {
         return "Q6G64_F16S";
     case NumericFormat::W8G32_F16S:
         return "W8G32_F16S";
+    case NumericFormat::Q3G64_F16S:
+        return "Q3G64_F16S";
     }
     return {};
 }
@@ -88,6 +90,8 @@ std::string_view layout_name(StorageLayout layout) noexcept {
         return "contiguous-le-v1";
     case StorageLayout::RowSplitK128V1:
         return "row-split-k128-v1";
+    case StorageLayout::GroupInterleavedV1:
+        return "group-interleaved-v1";
     }
     return {};
 }
@@ -118,6 +122,15 @@ std::uint64_t tensor_encoded_size(StorageLayout layout, NumericFormat format,
         return checked_mul(elements, direct_word_bytes(format), "tensor encoded size");
     }
 
+    if (layout == StorageLayout::GroupInterleavedV1) {
+        if (format != NumericFormat::Q3G64_F16S || shape.size() != 2 || shape[0] == 0 ||
+            shape[1] == 0 || shape[1] % 64 != 0) {
+            throw ArtifactError(
+                "group-interleaved-v1 requires positive rank-two Q3G64 with complete groups");
+        }
+        const auto groups = checked_mul(shape[0], shape[1] / 64, "physical group count");
+        return checked_mul(groups, 26, "tensor encoded size");
+    }
     if (layout != StorageLayout::RowSplitK128V1) { throw ArtifactError("unknown tensor layout"); }
     if (shape.size() != 2 || shape[0] == 0 || shape[1] == 0) {
         throw ArtifactError("row-split-k128-v1 requires a positive rank-two shape");

@@ -8,10 +8,14 @@
 #include "artifact/binder.h"
 #include "artifact/materializer.h"
 #include "core/tensor.h"
+#include "ninfer/ops/cpu_sparse_moe.h"
 #include "ninfer/ops/sparse_moe.h"
+#include "ops/sparse_moe/streaming/streaming_sparse_moe.h"
 
 #include <array>
 #include <cstddef>
+#include <cstdint>
+#include <memory>
 #include <utility>
 
 namespace ninfer::targets::qwen3_6_35b_a3b::detail {
@@ -26,6 +30,9 @@ struct MoePlan {
     artifact::ObjectHandle routed_down;
     artifact::ObjectHandle shared_gate_up;
     artifact::ObjectHandle shared_down;
+    artifact::NumericFormat routed_gate_up_format = artifact::NumericFormat::Q4G64_F16S;
+    artifact::NumericFormat routed_down_format    = artifact::NumericFormat::Q5G64_F16S;
+    bool host = false;
 };
 
 struct FullAttentionPlan {
@@ -79,6 +86,8 @@ struct BindingPlan {
     artifact::ObjectHandle vision_merger_fc2;
     artifact::ObjectHandle vision_merger_fc2_bias;
     qwen3_6::VisionMergerNormPlan vision_merger_norm;
+    std::size_t host_moe_layers = 0;
+    bool compact_5070ti_experts = false;
 };
 
 struct ArtifactLoadPlan {
@@ -86,10 +95,11 @@ struct ArtifactLoadPlan {
     artifact::MaterializationPlan materialization;
 };
 
-ArtifactLoadPlan bind_artifact(artifact::Binder& binder);
+ArtifactLoadPlan bind_artifact(artifact::Binder& binder, std::uint64_t device_weight_budget);
 
 struct SparseMoePayload {
     ops::SparseMoeWeights op;
+    std::shared_ptr<ops::detail::StreamingSparseMoeExecutor> streamer;
 };
 
 struct AttentionProjectionPayload {

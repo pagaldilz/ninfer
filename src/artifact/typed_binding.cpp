@@ -21,6 +21,8 @@ StorageLayout storage_layout_for(NumericFormat format) {
     case NumericFormat::Q6G64_F16S:
     case NumericFormat::W8G32_F16S:
         return StorageLayout::RowSplitK128V1;
+    case NumericFormat::Q3G64_F16S:
+        return StorageLayout::GroupInterleavedV1;
     }
     throw std::logic_error("unhandled numeric format");
 }
@@ -41,6 +43,8 @@ QType qtype_for(NumericFormat format) {
         return QType::Q6G64_F16S;
     case NumericFormat::W8G32_F16S:
         return QType::W8G32_F16S;
+    case NumericFormat::Q3G64_F16S:
+        return QType::Q3G64_F16S;
     }
     throw std::logic_error("unhandled numeric format");
 }
@@ -58,10 +62,10 @@ DType dtype_for(NumericFormat format) {
     }
 }
 
-Weight contiguous_weight(const MaterializedArtifact& materialized, ObjectHandle handle,
-                         NumericFormat format, std::int32_t rows, std::int32_t columns) {
+Weight contiguous_weight(const void* storage, NumericFormat format, std::int32_t rows,
+                         std::int32_t columns) {
     Weight out{};
-    out.payload       = materialized.device_data(handle);
+    out.payload       = const_cast<void*>(storage);
     out.qdata         = out.payload;
     out.payload_bytes = static_cast<std::uint64_t>(rows) * columns * dtype_size(dtype_for(format));
     out.qtype         = qtype_for(format);
@@ -76,12 +80,12 @@ Weight contiguous_weight(const MaterializedArtifact& materialized, ObjectHandle 
     return out;
 }
 
-Weight row_split_weight(const MaterializedArtifact& materialized, ObjectHandle handle,
-                        NumericFormat format, std::int32_t rows, std::int32_t columns) {
+Weight row_split_weight(const void* storage, NumericFormat format, std::int32_t rows,
+                        std::int32_t columns) {
     const std::array<std::uint64_t, 2> shape = {static_cast<std::uint64_t>(rows),
                                                 static_cast<std::uint64_t>(columns)};
     const RowSplitGeometry geometry          = row_split_geometry(format, shape);
-    const auto* bytes = static_cast<const std::byte*>(materialized.device_data(handle));
+    const auto* bytes = static_cast<const std::byte*>(storage);
 
     Weight out{};
     out.payload          = bytes;
@@ -116,6 +120,39 @@ ObjectHandle bind_device_tensor(Binder& binder, std::string_view name, NumericFo
     return handle;
 }
 
+Weight group_interleaved_weight(const void* storage, NumericFormat format, std::int32_t rows,
+                                std::int32_t columns) {
+    if (format != NumericFormat::Q3G64_F16S || columns <= 0 || columns % 64 != 0) {
+        throw std::logic_error("invalid group-interleaved weight");
+    }
+    Weight out{};
+    out.payload          = storage;
+    out.payload_bytes    = static_cast<std::uint64_t>(rows) * (columns / 64) * 26;
+    out.qtype            = QType::Q3G64_F16S;
+    out.group_size       = 64;
+    out.qdata            = storage;
+    out.n                = rows;
+    out.k                = columns;
+    out.group            = 64;
+    out.layout           = QuantLayout::GroupInterleaved;
+    out.scale_dtype      = DType::FP16;
+    out.ndim             = 2;
+    out.shape[0]         = rows;
+    out.shape[1]         = columns;
+    out.padded_shape[0]  = rows;
+    out.padded_shape[1]  = columns;
+    return out;
+}
+
+ObjectHandle bind_host_tensor(Binder& binder, std::string_view name, NumericFormat format,
+                              std::initializer_list<std::uint64_t> shape) {
+    const ObjectHandle handle =
+        binder.require_tensor(name, format, storage_layout_for(format),
+                              std::span<const std::uint64_t>(shape.begin(), shape.size()));
+    binder.materialize_tensor_on_host(handle);
+    return handle;
+}
+
 ObjectHandle bind_raw_resource(Binder& binder, std::string_view name) {
     const ObjectHandle handle = binder.require_resource(name, ResourceEncoding::RawBytesV1);
     binder.retain_on_host(handle);
@@ -131,9 +168,24 @@ Tensor materialized_tensor(const MaterializedArtifact& materialized, ObjectHandl
 Weight materialized_weight(const MaterializedArtifact& materialized, ObjectHandle handle,
                            NumericFormat format, std::int32_t rows, std::int32_t columns) {
     if (storage_layout_for(format) == StorageLayout::ContiguousLeV1) {
-        return contiguous_weight(materialized, handle, format, rows, columns);
+        return contiguous_weight(materialized.device_data(handle), format, rows, columns);
     }
-    return row_split_weight(materialized, handle, format, rows, columns);
+    if (storage_layout_for(format) == StorageLayout::GroupInterleavedV1) {
+        return group_interleaved_weight(materialized.device_data(handle), format, rows, columns);
+    }
+    return row_split_weight(materialized.device_data(handle), format, rows, columns);
+}
+
+Weight materialized_host_weight(const MaterializedArtifact& materialized, ObjectHandle handle,
+                                NumericFormat format, std::int32_t rows, std::int32_t columns) {
+    if (storage_layout_for(format) == StorageLayout::ContiguousLeV1) {
+        return contiguous_weight(materialized.host_tensor_data(handle), format, rows, columns);
+    }
+    if (storage_layout_for(format) == StorageLayout::GroupInterleavedV1) {
+        return group_interleaved_weight(materialized.host_tensor_data(handle), format, rows,
+                                        columns);
+    }
+    return row_split_weight(materialized.host_tensor_data(handle), format, rows, columns);
 }
 
 } // namespace ninfer::artifact

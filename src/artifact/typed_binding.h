@@ -15,6 +15,10 @@ class MaterializedArtifact;
                                               NumericFormat format,
                                               std::initializer_list<std::uint64_t> shape);
 
+[[nodiscard]] ObjectHandle bind_host_tensor(Binder& binder, std::string_view name,
+                                            NumericFormat format,
+                                            std::initializer_list<std::uint64_t> shape);
+
 [[nodiscard]] ObjectHandle bind_raw_resource(Binder& binder, std::string_view name);
 
 [[nodiscard]] Tensor materialized_tensor(const MaterializedArtifact& materialized,
@@ -24,5 +28,9 @@ class MaterializedArtifact;
 [[nodiscard]] Weight materialized_weight(const MaterializedArtifact& materialized,
                                          ObjectHandle handle, NumericFormat format,
                                          std::int32_t rows, std::int32_t columns);
+
+[[nodiscard]] Weight materialized_host_weight(const MaterializedArtifact& materialized,
+                                              ObjectHandle handle, NumericFormat format,
+                                              std::int32_t rows, std::int32_t columns);
 
 } // namespace ninfer::artifact

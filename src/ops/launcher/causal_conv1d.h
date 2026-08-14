@@ -10,7 +10,7 @@
 
 namespace ninfer::ops::detail {
 
-inline constexpr std::int32_t kCausalConvSequenceMaxTokens = 64;
+inline constexpr std::int32_t kCausalConvSequenceMaxTokens = 4096;
 inline constexpr std::int32_t kCausalConvParallelMaxTokens = 16;
 
 void causal_conv1d_prefill_launch(const Tensor& x, const Tensor& weight,

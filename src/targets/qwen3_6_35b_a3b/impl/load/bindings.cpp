@@ -3,6 +3,8 @@
 #include "artifact/typed_binding.h"
 
 #include <cstddef>
+#include <array>
+#include <cstdint>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -20,36 +22,97 @@ NumericFormat routed_down_format(std::size_t layer) {
 }
 
 MoePlan bind_moe(artifact::Binder& binder, const std::string& prefix, NumericFormat routed_gate_up,
-                 NumericFormat routed_down) {
+                 NumericFormat routed_down, bool host = false) {
     return MoePlan{
-        .router_shared_gate = artifact::bind_device_tensor(binder, prefix + "router_shared_gate",
-                                                           NumericFormat::BF16, {257, 2048}),
-        .routed_gate_up     = artifact::bind_device_tensor(binder, prefix + "routed_gate_up",
-                                                           routed_gate_up, {262144, 2048}),
-        .routed_down    = artifact::bind_device_tensor(binder, prefix + "routed_down", routed_down,
-                                                       {524288, 512}),
-        .shared_gate_up = artifact::bind_device_tensor(binder, prefix + "shared_gate_up",
-                                                       NumericFormat::W8G32_F16S, {1024, 2048}),
-        .shared_down    = artifact::bind_device_tensor(binder, prefix + "shared_down",
-                                                       NumericFormat::W8G32_F16S, {2048, 512}),
+        .router_shared_gate = artifact::bind_device_tensor(
+            binder, prefix + "router_shared_gate", NumericFormat::BF16, {257, 2048}),
+        .routed_gate_up = host ? artifact::bind_host_tensor(
+                                    binder, prefix + "routed_gate_up", routed_gate_up,
+                                    {262144, 2048})
+                              : artifact::bind_device_tensor(
+                                    binder, prefix + "routed_gate_up", routed_gate_up,
+                                    {262144, 2048}),
+        .routed_down = host ? artifact::bind_host_tensor(
+                                 binder, prefix + "routed_down", routed_down, {524288, 512})
+                           : artifact::bind_device_tensor(
+                                 binder, prefix + "routed_down", routed_down, {524288, 512}),
+        .shared_gate_up = artifact::bind_device_tensor(
+            binder, prefix + "shared_gate_up", NumericFormat::W8G32_F16S, {1024, 2048}),
+        .shared_down = artifact::bind_device_tensor(
+            binder, prefix + "shared_down", NumericFormat::W8G32_F16S, {2048, 512}),
+        .routed_gate_up_format = routed_gate_up,
+        .routed_down_format = routed_down,
+        .host = host,
     };
 }
 
 SparseMoePayload load_moe(const MoePlan& plan, const artifact::MaterializedArtifact& materialized,
-                          NumericFormat routed_gate_up, NumericFormat routed_down) {
+                          const std::shared_ptr<ops::detail::StreamingSparseMoeExecutor>&
+                              streamer = {}) {
+    const auto routed = [&](artifact::ObjectHandle handle, NumericFormat format,
+                            std::int32_t rows, std::int32_t columns) {
+        return plan.host
+                   ? artifact::materialized_host_weight(materialized, handle, format, rows, columns)
+                   : artifact::materialized_weight(materialized, handle, format, rows, columns);
+    };
     return SparseMoePayload{
         .op = {
             .router_shared_gate = artifact::materialized_weight(
                 materialized, plan.router_shared_gate, NumericFormat::BF16, 257, 2048),
-            .routed_gate_up = artifact::materialized_weight(materialized, plan.routed_gate_up,
-                                                            routed_gate_up, 262144, 2048),
-            .routed_down    = artifact::materialized_weight(materialized, plan.routed_down,
-                                                            routed_down, 524288, 512),
-            .shared_gate_up = artifact::materialized_weight(materialized, plan.shared_gate_up,
-                                                            NumericFormat::W8G32_F16S, 1024, 2048),
-            .shared_down    = artifact::materialized_weight(materialized, plan.shared_down,
-                                                            NumericFormat::W8G32_F16S, 2048, 512),
-        }};
+            .routed_gate_up = routed(plan.routed_gate_up, plan.routed_gate_up_format, 262144, 2048),
+            .routed_down    = routed(plan.routed_down, plan.routed_down_format, 524288, 512),
+            .shared_gate_up = artifact::materialized_weight(
+                materialized, plan.shared_gate_up, NumericFormat::W8G32_F16S, 1024, 2048),
+            .shared_down = artifact::materialized_weight(
+                materialized, plan.shared_down, NumericFormat::W8G32_F16S, 2048, 512),
+        },
+        .streamer = plan.host ? streamer : nullptr};
+}
+
+std::array<bool, kTextLayers> host_moe_placement(std::uint64_t device_weight_budget,
+                                                 bool compact) {
+    constexpr std::uint64_t kFullDeviceArena = 22'360'207'360ULL;
+    constexpr std::uint64_t kQ5LayerBytes    = 461'373'440ULL;
+    constexpr std::uint64_t kQ6LayerBytes    = 494'927'872ULL;
+    constexpr std::uint64_t kCompactDeviceArena = 18'501'447'680ULL;
+    constexpr std::uint64_t kCompactLayerBytes  = 360'710'144ULL;
+    const std::uint64_t full_device_arena = compact ? kCompactDeviceArena : kFullDeviceArena;
+    std::array<bool, kTextLayers> host{};
+    if (device_weight_budget >= full_device_arena) { return host; }
+    const std::uint64_t streaming_bytes =
+        ops::detail::streaming_sparse_moe_device_bytes(compact);
+    if (device_weight_budget <= streaming_bytes) {
+        throw artifact::ArtifactError("5070 Ti device budget cannot reserve sparse-MoE staging");
+    }
+    const std::uint64_t resident_budget = device_weight_budget - streaming_bytes;
+    std::uint64_t savings = 0;
+    const auto select = [&](std::size_t layer, std::uint64_t bytes) {
+        if (full_device_arena - savings <= resident_budget) { return; }
+        host[layer] = true;
+        savings += bytes;
+    };
+    if (compact) {
+        // The compact staging bank admits only the uniform Q3+Q4 codec. Keep the two promoted
+        // Q6-down layers and the final Q4+Q6 layer resident, then stream uniform layers in order.
+        for (std::size_t layer = 0; layer < kTextLayers; ++layer) {
+            if (layer != 34 && layer != 38 && layer != 39) {
+                select(layer, kCompactLayerBytes);
+            }
+        }
+    } else {
+        // Minimize the number of CPU layers first; the three larger Q6-down banks therefore move
+        // before the uniform Q5-down banks.
+        select(34, kQ6LayerBytes);
+        select(38, kQ6LayerBytes);
+        select(39, kQ6LayerBytes);
+        for (std::size_t layer = 0; layer < kTextLayers; ++layer) {
+            if (!host[layer]) { select(layer, kQ5LayerBytes); }
+        }
+    }
+    if (full_device_arena - savings > resident_budget) {
+        throw artifact::ArtifactError("5070 Ti device budget cannot retain the non-MoE weights");
+    }
+    return host;
 }
 
 void validate_draft_ids(const artifact::Binder& binder, artifact::ObjectHandle handle) {
@@ -72,9 +135,12 @@ void validate_draft_ids(const artifact::Binder& binder, artifact::ObjectHandle h
 
 } // namespace
 
-ArtifactLoadPlan bind_artifact(artifact::Binder& binder) {
+ArtifactLoadPlan bind_artifact(artifact::Binder& binder, std::uint64_t device_weight_budget) {
     ArtifactLoadPlan load_plan;
     BindingPlan& out    = load_plan.bindings;
+    out.compact_5070ti_experts =
+        binder.tensor_format("text/layers/0/moe/routed_gate_up") == NumericFormat::Q3G64_F16S;
+    const auto host_moe = host_moe_placement(device_weight_budget, out.compact_5070ti_experts);
     out.frontend        = qwen3_6::bind_frontend_resources(binder);
     out.token_embedding = artifact::bind_device_tensor(binder, "text/token_embedding",
                                                        NumericFormat::W8G32_F16S, {248320, 2048});
@@ -113,8 +179,16 @@ ArtifactLoadPlan bind_artifact(artifact::Binder& binder) {
         }
         target.post_attention_norm = artifact::bind_device_tensor(
             binder, prefix + "post_attention_norm", NumericFormat::BF16, {2048});
-        target.moe =
-            bind_moe(binder, prefix + "moe/", NumericFormat::Q4G64_F16S, routed_down_format(layer));
+        const NumericFormat gate_format = out.compact_5070ti_experts && layer < 39
+                                              ? NumericFormat::Q3G64_F16S
+                                              : NumericFormat::Q4G64_F16S;
+        const NumericFormat down_format =
+            out.compact_5070ti_experts && layer < 39 && layer != 34 && layer != 38
+                ? NumericFormat::Q4G64_F16S
+                : routed_down_format(layer);
+        target.moe = bind_moe(binder, prefix + "moe/", gate_format, down_format,
+                              host_moe[layer]);
+        out.host_moe_layers += host_moe[layer] ? 1U : 0U;
     }
 
     out.final_norm =
@@ -160,6 +234,10 @@ ArtifactLoadPlan bind_artifact(artifact::Binder& binder) {
     out.vision_merger_norm = qwen3_6::bind_vision_merger_norm(binder);
 
     load_plan.materialization = binder.finish();
+    if (out.host_moe_layers != 0) {
+        load_plan.materialization.device_capacity_bytes +=
+            ops::detail::streaming_sparse_moe_device_bytes(out.compact_5070ti_experts);
+    }
     return load_plan;
 }
 
@@ -177,6 +255,12 @@ LoadedModelData::LoadedModelData(BindingPlan plan, artifact::MaterializedArtifac
     auto& draft_head_token_ids = runtime.draft_head_token_ids;
     auto& mtp                  = runtime.mtp;
     auto& vision               = runtime.vision;
+    std::shared_ptr<ops::detail::StreamingSparseMoeExecutor> streamer;
+    if (plan.host_moe_layers != 0) {
+        streamer =
+            std::make_shared<ops::detail::StreamingSparseMoeExecutor>(
+                backing.device_arena(), plan.compact_5070ti_experts);
+    }
 
     token_embedding = artifact::materialized_weight(backing, plan.token_embedding,
                                                     NumericFormat::W8G32_F16S, 248320, 2048);
@@ -200,8 +284,7 @@ LoadedModelData::LoadedModelData(BindingPlan plan, artifact::MaterializedArtifac
                                                               NumericFormat::W8G32_F16S, 2048, 4096);
             target.post_attention_norm = artifact::materialized_tensor(
                 backing, source.post_attention_norm, NumericFormat::BF16, {2048});
-            target.post_mixer =
-                load_moe(source.moe, backing, NumericFormat::Q4G64_F16S, routed_down_format(layer));
+            target.post_mixer = load_moe(source.moe, backing, streamer);
         } else {
             GdnWeights& target = gdn_layers.at(gdn_index++);
             target.input_norm  = artifact::materialized_tensor(backing, source.input_norm,
@@ -222,8 +305,7 @@ LoadedModelData::LoadedModelData(BindingPlan plan, artifact::MaterializedArtifac
                                                                        NumericFormat::W8G32_F16S, 2048, 4096);
             target.post_attention_norm = artifact::materialized_tensor(
                 backing, source.post_attention_norm, NumericFormat::BF16, {2048});
-            target.post_mixer =
-                load_moe(source.moe, backing, NumericFormat::Q4G64_F16S, routed_down_format(layer));
+            target.post_mixer = load_moe(source.moe, backing, streamer);
         }
     }
     if (full_index != full_layers.size() || gdn_index != gdn_layers.size()) {
@@ -258,7 +340,7 @@ LoadedModelData::LoadedModelData(BindingPlan plan, artifact::MaterializedArtifac
     mtp.post_attention_norm = artifact::materialized_tensor(backing, plan.mtp.post_attention_norm,
                                                             NumericFormat::BF16, {2048});
     mtp.post_mixer =
-        load_moe(plan.mtp.moe, backing, NumericFormat::W8G32_F16S, NumericFormat::W8G32_F16S);
+        load_moe(plan.mtp.moe, backing);
     mtp.final_norm =
         artifact::materialized_tensor(backing, plan.mtp.final_norm, NumericFormat::BF16, {2048});
 

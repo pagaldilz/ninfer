@@ -36,6 +36,30 @@ ninfer_add_op_bench(ninfer_gqa_attention_bench SOURCES ops/gqa_attention_bench.c
 ninfer_add_op_bench(ninfer_sampling_select_bench SOURCES ops/sampling_select_bench.cu)
 ninfer_add_op_bench(ninfer_sparse_moe_bench SOURCES ops/sparse_moe_bench.cu)
 
+# The Windows benchmark build is intentionally dependency-light (no FFmpeg/curl). Keep the
+# independent full-formula sparse-MoE qualification executable beside the performance tools so
+# the host-resident execution leaf is validated on the exact machine before end-to-end timing.
+add_executable(ninfer_sparse_moe_cpu_test
+  ${PROJECT_SOURCE_DIR}/tests/ops/test_sparse_moe.cpp)
+target_include_directories(ninfer_sparse_moe_cpu_test PRIVATE
+  ${PROJECT_SOURCE_DIR}/include
+  ${PROJECT_SOURCE_DIR}/src
+  ${PROJECT_SOURCE_DIR}/tests
+  ${PROJECT_SOURCE_DIR}/tests/ops)
+target_link_libraries(ninfer_sparse_moe_cpu_test PRIVATE ninfer_ops)
+
+# Keep the long-prefill causal-convolution qualification beside the Windows benchmark too. This
+# exercises the sequence kernel (including T=4096) against its independent FP64 oracle without
+# requiring the full test-suite configuration.
+add_executable(ninfer_causal_conv1d_test
+  ${PROJECT_SOURCE_DIR}/tests/ops/test_causal_conv1d_silu.cpp)
+target_include_directories(ninfer_causal_conv1d_test PRIVATE
+  ${PROJECT_SOURCE_DIR}/include
+  ${PROJECT_SOURCE_DIR}/src
+  ${PROJECT_SOURCE_DIR}/tests
+  ${PROJECT_SOURCE_DIR}/tests/ops)
+target_link_libraries(ninfer_causal_conv1d_test PRIVATE ninfer_ops)
+
 # End-to-end product benchmark: public Engine API and native .ninfer artifacts only.
 add_executable(ninfer_bench targets/qwen3_6_27b/ninfer_bench.cpp targets/qwen3_6_27b/ninfer_bench_support.cpp)
 target_include_directories(ninfer_bench PRIVATE
@@ -44,7 +68,13 @@ target_include_directories(ninfer_bench PRIVATE
   ${PROJECT_SOURCE_DIR}/src
   ${PROJECT_SOURCE_DIR}/third_party)
 target_compile_definitions(ninfer_bench PRIVATE NINFER_SOURCE_DIR="${PROJECT_SOURCE_DIR}")
-target_link_libraries(ninfer_bench PRIVATE ninfer_engine CUDA::cudart)
+target_link_libraries(ninfer_bench PRIVATE ninfer_engine ${NINFER_CUDART_TARGET})
+
+add_executable(ninfer_generate_check targets/qwen3_6_27b/ninfer_generate_check.cpp)
+target_include_directories(ninfer_generate_check PRIVATE
+  ${PROJECT_SOURCE_DIR}/include
+  ${PROJECT_SOURCE_DIR}/src)
+target_link_libraries(ninfer_generate_check PRIVATE ninfer_engine ${NINFER_CUDART_TARGET})
 
 # Native target-private MTP proposal/verification microbenchmark. It enters through the target
 # Program facade and executes the production round schedule over a real .ninfer artifact.

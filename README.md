@@ -13,6 +13,7 @@ runtime:
 |---|---|---:|---|
 | [Qwen3.6-27B](https://huggingface.co/neroued/Qwen3.6-27B-NInfer) | `qwen3_6_27b.ninfer` | 17,495,365,888 bytes (16.29 GiB) | `74fac75f3a6b7ab7b52e08c36969c7a33a8ba23465910eccd72d195adb497127` |
 | [Qwen3.6-35B-A3B](https://huggingface.co/neroued/Qwen3.6-35B-A3B-NInfer) | `qwen3_6_35b_a3b.ninfer` | 22,373,184,256 bytes (20.84 GiB) | `9e8378398d2b789a77224b5110c7590adbbc6fd4accd139b918157b2b9da7163` |
+| Qwen3.6-35B-A3B RTX 5070 Ti compact profile (local conversion) | `qwen3_6_35b_a3b_5070ti_gguf.ninfer` | 18,514,424,576 bytes (17.24 GiB) | `c989d0e1a6e3c31b2e175361075fa6eca48bfa2a055509d1490066b1896461ec` |
 
 ## Performance
 
@@ -87,6 +88,30 @@ build/apps/ninfer-serve
 ```
 
 Tests, benchmarks, and maintainer tools are excluded from the default build.
+
+### Windows RTX 5070 Ti benchmark build
+
+The repository also contains a native Windows text benchmark build for the 16-GiB RTX 5070 Ti.
+It uses the public Engine route but omits FFmpeg/cURL applications and reserves no Vision workspace
+when `ninfer_bench --text-only` is selected. See [the measured hardware profile](docs/performance.md#windows-rtx-5070-ti-hardware-profile).
+
+```bat
+set NINFER_BUILD_DIR=H:\AiModelLearning\Ninfer\build-win-5070ti-bench
+set NINFER_BUILD_BENCHMARKS=ON
+tools\windows\configure-5070ti.cmd
+tools\windows\benchmark-5070ti.cmd out\qwen3_6_35b_a3b_5070ti_gguf.ninfer
+```
+
+The compact profile is built offline from the complete published `.ninfer` artifact and the exact
+exercised Unsloth IQ4_XS GGUF. The converter uses llama.cpp's official `gguf-py` I-quant decoder,
+then writes native NInfer Q3/Q4 expert layouts; inference itself does not read GGUF. See the
+[35B artifact contract](docs/maintainer/qwen3.6-35b-a3b-artifact.md#11-rtx-5070-ti-compact-profile)
+for the exact command and provenance.
+
+On the local RTX 5070 Ti, the compact profile measured **4,047.63 prefill tok/s** for a 30,615-token
+prompt and **111.05 generated tok/s** for the following 128-token output (one warm-up, two measured
+repetitions). The matched saved llama.cpp result was 3,235.17 prefill tok/s and 80.36 generated
+tok/s; see the measured hardware profile for the complete comparison and short-prompt results.
 
 ## Download a model
 

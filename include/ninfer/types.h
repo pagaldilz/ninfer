@@ -43,6 +43,7 @@ struct EngineOptions {
     KvCacheStorage kv_cache     = KvCacheStorage::BFloat16;
     SpeculativeOptions speculative;
     bool use_cuda_graph = true;
+    bool enable_vision  = true;
     LoadProgress load_progress;
 };
 
@@ -244,8 +245,10 @@ struct LoadSummary {
     double upload_seconds              = 0.0;
     std::uint64_t artifact_bytes_read  = 0;
     std::uint64_t host_to_device_bytes = 0;
+    std::uint64_t host_tensor_bytes    = 0;
     std::uint64_t peak_staging_bytes   = 0;
     std::size_t tensor_count           = 0;
+    std::size_t host_tensor_count      = 0;
     std::size_t resource_count         = 0;
 };
 

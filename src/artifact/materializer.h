@@ -23,9 +23,11 @@ struct MaterializationStats {
     std::uint64_t file_bytes              = 0;
     std::uint64_t h2d_bytes               = 0;
     std::uint64_t device_capacity_bytes   = 0;
+    std::uint64_t host_tensor_bytes       = 0;
     std::uint64_t retained_resource_bytes = 0;
     std::uint64_t peak_staging_bytes      = 0;
     std::size_t tensor_count              = 0;
+    std::size_t host_tensor_count         = 0;
     std::size_t resource_count            = 0;
     double upload_seconds                 = 0.0;
 };
@@ -40,6 +42,7 @@ public:
     MaterializedArtifact& operator=(const MaterializedArtifact&)     = delete;
 
     void* device_data(ObjectHandle handle) const;
+    const void* host_tensor_data(ObjectHandle handle) const;
     std::span<const std::byte> resource_bytes(ObjectHandle handle) const;
     std::vector<std::byte> take_resource_bytes(ObjectHandle handle);
 
@@ -53,6 +56,7 @@ private:
 
     struct ObjectStorage {
         void* device = nullptr;
+        std::unique_ptr<AlignedHostBuffer> host_tensor;
         std::vector<std::byte> resource;
     };
 

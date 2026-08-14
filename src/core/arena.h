@@ -81,6 +81,28 @@ private:
     std::size_t size_ = 0;
 };
 
+// Ordinary cacheable host memory for large CPU-resident weight banks. This is
+// deliberately distinct from PinnedHostBuffer: pinning multi-gigabyte model
+// storage would starve the Windows memory manager and does not make CPU GEMV
+// faster.
+class AlignedHostBuffer {
+public:
+    AlignedHostBuffer(std::size_t size_bytes, std::size_t alignment);
+    ~AlignedHostBuffer();
+
+    AlignedHostBuffer(const AlignedHostBuffer&)            = delete;
+    AlignedHostBuffer& operator=(const AlignedHostBuffer&) = delete;
+    AlignedHostBuffer(AlignedHostBuffer&& other) noexcept;
+    AlignedHostBuffer& operator=(AlignedHostBuffer&& other) noexcept;
+
+    void* data() const noexcept;
+    std::size_t size() const noexcept;
+
+private:
+    void* data_       = nullptr;
+    std::size_t size_ = 0;
+};
+
 using WorkspaceArena = DeviceArena;
 
 } // namespace ninfer

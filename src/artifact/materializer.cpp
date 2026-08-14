@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cstdint>
+#include <cstring>
 #include <limits>
 #include <memory>
 #include <stdexcept>
@@ -69,6 +70,13 @@ void* MaterializedArtifact::device_data(ObjectHandle handle) const {
     return objects_[handle.index].device;
 }
 
+const void* MaterializedArtifact::host_tensor_data(ObjectHandle handle) const {
+    if (handle.index >= objects_.size() || objects_[handle.index].host_tensor == nullptr) {
+        throw ArtifactError("object handle does not name a materialized host tensor");
+    }
+    return objects_[handle.index].host_tensor->data();
+}
+
 std::span<const std::byte> MaterializedArtifact::resource_bytes(ObjectHandle handle) const {
     if (handle.index >= objects_.size() || objects_[handle.index].resource.empty()) {
         throw ArtifactError("object handle does not name a materialized resource");
@@ -101,8 +109,27 @@ MaterializedArtifact materialize(const Reader& reader, const MaterializationPlan
     out.device_arena_     = std::make_unique<DeviceArena>(static_cast<std::size_t>(capacity));
     out.stats_.file_bytes = reader.file_bytes();
     out.stats_.device_capacity_bytes = capacity;
-    out.stats_.tensor_count          = plan.device_objects.size();
+    out.stats_.tensor_count          = plan.device_objects.size() + plan.host_tensor_objects.size();
+    out.stats_.host_tensor_count     = plan.host_tensor_objects.size();
     out.stats_.resource_count        = plan.host_objects.size();
+
+    for (const HostTensorMaterialization& placement : plan.host_tensor_objects) {
+        if (placement.bytes == 0 || placement.bytes > static_cast<std::uint64_t>(SIZE_MAX) ||
+            placement.alignment > static_cast<std::uint64_t>(SIZE_MAX)) {
+            throw ArtifactError("host tensor materialization size is invalid");
+        }
+        const PayloadSpan payload = reader.payload(reader.objects().at(placement.object.index));
+        if (payload.data.size() != placement.bytes) {
+            throw ArtifactError("host tensor materialization plan does not match artifact payload");
+        }
+        auto storage = std::make_unique<AlignedHostBuffer>(
+            static_cast<std::size_t>(placement.bytes),
+            static_cast<std::size_t>(placement.alignment));
+        std::memcpy(storage->data(), payload.data.data(), payload.data.size());
+        out.objects_.at(placement.object.index).host_tensor = std::move(storage);
+        out.stats_.host_tensor_bytes = checked_add(out.stats_.host_tensor_bytes, placement.bytes,
+                                                   "host tensor byte count overflows u64");
+    }
 
     for (const HostMaterialization& placement : plan.host_objects) {
         auto& resource            = out.objects_.at(placement.object.index).resource;

@@ -134,6 +134,17 @@ __global__ void sparse_moe_d2_serial_control_kernel(const float* __restrict__ sc
 struct Q4Codec {
     static constexpr int kGroupK         = 64;
     static constexpr bool kD3PackedWord8 = true;
+    static constexpr bool kPackedWord8   = true;
+
+    __device__ static __forceinline__ void
+    load_eight(const std::uint8_t* codes, const std::uint8_t*, const std::uint8_t* scales,
+               std::int64_t group_index, int lane_in_group, float (&weights)[8]) {
+        const std::uint32_t packed = *reinterpret_cast<const std::uint32_t*>(
+            codes + group_index * 32 + lane_in_group * 4);
+        const auto scale_bits = *reinterpret_cast<const std::uint16_t*>(
+            scales + group_index * 2);
+        Q4SimtDecodeAtom::decode_eight(packed, scale_bits, weights);
+    }
 };
 
 struct Q5Codec {
@@ -189,6 +200,33 @@ struct W8Codec {
     load_pair(const std::uint8_t* codes, const std::uint8_t* high, const std::uint8_t* scales,
               std::int64_t group_index, int lane, float& w0, float& w1) {
         W8ScalarDecodeAtom::load_pair(codes, high, scales, group_index, lane, w0, w1);
+    }
+};
+
+struct Q3Codec {
+    static constexpr int kGroupK                = 64;
+    static constexpr bool kD3SingleValuePerLane = false;
+    static constexpr bool kD3PackedWord8        = false;
+    static constexpr bool kPackedWord8          = false;
+    static constexpr int kGroupBytes            = 26;
+
+    __device__ static __forceinline__ void
+    load_pair(const std::uint8_t* payload, const std::uint8_t*, const std::uint8_t*,
+              std::int64_t group_index, int lane, float& w0, float& w1) {
+        const auto* group = payload + group_index * kGroupBytes;
+        const int bit = lane * 6;
+        const int byte = bit / 8;
+        const std::uint32_t packed = static_cast<std::uint32_t>(group[byte]) |
+                                     (static_cast<std::uint32_t>(group[byte + 1]) << 8);
+        const int shift = bit & 7;
+        const int u0 = static_cast<int>((packed >> shift) & 7U);
+        const int u1 = static_cast<int>((packed >> (shift + 3)) & 7U);
+        const int q0 = u0 >= 4 ? u0 - 8 : u0;
+        const int q1 = u1 >= 4 ? u1 - 8 : u1;
+        const float scale = __half2float(
+            __ushort_as_half(*reinterpret_cast<const std::uint16_t*>(group + 24)));
+        w0 = static_cast<float>(q0) * scale;
+        w1 = static_cast<float>(q1) * scale;
     }
 };
 
@@ -698,6 +736,9 @@ void sparse_moe_decode_launch_d3(const Tensor& x, const SparseMoeWeights& weight
                                  const SparseMoeDecodeWorkspace& workspace,
                                  SparseMoeD3Schedule schedule, cudaStream_t stream) {
     switch (weights.routed_gate_up.qtype) {
+    case QType::Q3G64_F16S:
+        launch_d3_codec<Q3Codec>(x, weights, workspace, schedule, stream);
+        return;
     case QType::Q4G64_F16S:
         launch_d3_codec<Q4Codec>(x, weights, workspace, schedule, stream);
         return;
@@ -713,6 +754,9 @@ void sparse_moe_decode_launch_d4(const SparseMoeWeights& weights, Tensor& destin
                                  const SparseMoeDecodeWorkspace& workspace,
                                  SparseMoeD4Schedule schedule, cudaStream_t stream) {
     switch (weights.routed_down.qtype) {
+    case QType::Q4G64_F16S:
+        launch_d4_codec<Q4Codec>(weights, destination, workspace, schedule, stream);
+        return;
     case QType::Q5G64_F16S:
         launch_d4_codec<Q5Codec>(weights, destination, workspace, schedule, stream);
         return;
@@ -731,6 +775,9 @@ void sparse_moe_decode_launch_d3_small_t(const Tensor& x, const SparseMoeWeights
                                          const int* token_ids, float* token_activations,
                                          std::int32_t tokens, cudaStream_t stream) {
     switch (weights.routed_gate_up.qtype) {
+    case QType::Q3G64_F16S:
+        launch_d3_small_t_codec<Q3Codec>(x, weights, token_ids, token_activations, tokens, stream);
+        return;
     case QType::Q4G64_F16S:
         launch_d3_small_t_codec<Q4Codec>(x, weights, token_ids, token_activations, tokens, stream);
         return;
@@ -747,6 +794,10 @@ void sparse_moe_decode_launch_d4_small_t(const SparseMoeWeights& weights, Tensor
                                          const float* shared_scale, const float* token_activations,
                                          std::int32_t tokens, cudaStream_t stream) {
     switch (weights.routed_down.qtype) {
+    case QType::Q4G64_F16S:
+        launch_d4_small_t_codec<Q4Codec>(weights, destination, token_ids, token_alpha, shared_scale,
+                                         token_activations, tokens, stream);
+        return;
     case QType::Q5G64_F16S:
         launch_d4_small_t_codec<Q5Codec>(weights, destination, token_ids, token_alpha, shared_scale,
                                          token_activations, tokens, stream);

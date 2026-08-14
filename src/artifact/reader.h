@@ -26,11 +26,13 @@ enum class NumericFormat {
     Q5G64_F16S,
     Q6G64_F16S,
     W8G32_F16S,
+    Q3G64_F16S,
 };
 
 enum class StorageLayout {
     ContiguousLeV1,
     RowSplitK128V1,
+    GroupInterleavedV1,
 };
 
 enum class ResourceEncoding {

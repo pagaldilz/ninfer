@@ -127,6 +127,7 @@ public:
     const std::int32_t kv_quant_group;
     const ProposalHead proposal_head;
     const bool use_cuda_graph;
+    const bool enable_vision;
     const std::size_t kv_payload_bytes;
     const std::size_t graph_allowance_bytes;
 

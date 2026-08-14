@@ -35,11 +35,13 @@ enum class QType : std::uint16_t {
     BF16_CTRL  = 4,
     FP32_CTRL  = 5,
     I32_CTRL   = 6,
+    Q3G64_F16S = 7,
 };
 
 enum class QuantLayout : std::uint16_t {
     RowSplit   = 0,
     Contiguous = 1,
+    GroupInterleaved = 2,
 };
 
 struct Weight {

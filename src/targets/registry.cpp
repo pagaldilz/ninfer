@@ -55,13 +55,28 @@ void validate_device_budget(std::uint64_t weight_bytes, std::size_t sequence_byt
     }
 }
 
+std::uint64_t device_weight_budget(std::size_t sequence_bytes) {
+    constexpr std::uint64_t kRuntimeGuard = 512ULL * 1024ULL * 1024ULL;
+    std::size_t free_bytes  = 0;
+    std::size_t total_bytes = 0;
+    CUDA_CHECK(cudaMemGetInfo(&free_bytes, &total_bytes));
+    const std::uint64_t reserved =
+        checked_add(static_cast<std::uint64_t>(sequence_bytes), kRuntimeGuard,
+                    "sequence and runtime guard requirement overflows u64");
+    if (reserved >= free_bytes) {
+        throw std::invalid_argument("requested sequence capacity leaves no device memory for weights");
+    }
+    return static_cast<std::uint64_t>(free_bytes) - reserved;
+}
+
 template <class Target, class Loaded, class Instance>
 ConstructedTarget construct_registered(const EngineOptions& options, DeviceContext& device,
                                        artifact::Reader& reader, Clock::time_point load_start) {
     auto sequence_plan = Target::plan_sequence(device, options);
 
     artifact::Binder binder(reader);
-    auto load_plan = Target::plan_load(binder);
+    auto load_plan = Target::plan_load(
+        binder, device_weight_budget(sequence_plan.device_reservation_bytes()));
     validate_device_budget(load_plan.materialization().device_capacity_bytes,
                            sequence_plan.device_reservation_bytes());
     auto progress     = artifact_progress(options.load_progress);
@@ -79,8 +94,10 @@ ConstructedTarget construct_registered(const EngineOptions& options, DeviceConte
     summary.upload_seconds       = stats.upload_seconds;
     summary.artifact_bytes_read  = stats.file_bytes;
     summary.host_to_device_bytes = stats.h2d_bytes;
+    summary.host_tensor_bytes    = stats.host_tensor_bytes;
     summary.peak_staging_bytes   = stats.peak_staging_bytes;
     summary.tensor_count         = stats.tensor_count;
+    summary.host_tensor_count    = stats.host_tensor_count;
     summary.resource_count       = stats.resource_count;
     return ConstructedTarget{.active = ActiveTarget(std::move(instance)),
                              .load   = std::move(summary)};
@@ -94,7 +111,7 @@ LoadedQwen3_6_27B::LoadedQwen3_6_27B(std::unique_ptr<Qwen3_6_27B::LoadedModel> s
 LoadedQwen3_6_27B::~LoadedQwen3_6_27B() = default;
 
 Qwen3_6_27BInstance::Qwen3_6_27BInstance(std::unique_ptr<LoadedQwen3_6_27B> stable_loaded,
-                                         Qwen3_6_27B::SequencePlan sequence_plan,
+                                         Qwen3_6_27B::SequencePlan&& sequence_plan,
                                          DeviceContext& device)
     : loaded(std::move(stable_loaded)), request_memory(device), capacity(sequence_plan.capacity()),
       program(Qwen3_6_27B::create_program(*loaded->model, std::move(sequence_plan), device)) {}
@@ -108,7 +125,7 @@ LoadedQwen3_6_35BA3B::LoadedQwen3_6_35BA3B(
 LoadedQwen3_6_35BA3B::~LoadedQwen3_6_35BA3B() = default;
 
 Qwen3_6_35BA3BInstance::Qwen3_6_35BA3BInstance(std::unique_ptr<LoadedQwen3_6_35BA3B> stable_loaded,
-                                               Qwen3_6_35BA3B::SequencePlan sequence_plan,
+                                               Qwen3_6_35BA3B::SequencePlan&& sequence_plan,
                                                DeviceContext& device)
     : loaded(std::move(stable_loaded)), request_memory(device), capacity(sequence_plan.capacity()),
       program(Qwen3_6_35BA3B::create_program(*loaded->model, std::move(sequence_plan), device)) {}

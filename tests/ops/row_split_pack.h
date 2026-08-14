@@ -122,6 +122,8 @@ struct QuantSpec {
 
 inline QuantSpec quant_spec(QType qtype) {
     switch (qtype) {
+    case QType::Q3G64_F16S:
+        return {3, 64, 3, -4};
     case QType::Q4G64_F16S:
         return {4, 64, 7, -8};
     case QType::Q5G64_F16S:
@@ -195,6 +197,28 @@ inline int unpack_lowbit_code(const std::uint8_t* nibble, const std::uint8_t* hi
     return (u & sign) ? static_cast<int>(u) - static_cast<int>(span) : static_cast<int>(u);
 }
 
+inline void pack_q3_group(const std::int8_t* codes, std::uint8_t* output) {
+    std::fill(output, output + 24, static_cast<std::uint8_t>(0));
+    for (int lane = 0; lane < 64; ++lane) {
+        const std::uint32_t value = static_cast<std::uint32_t>(codes[lane]) & 7u;
+        const int bit             = lane * 3;
+        output[bit >> 3] |= static_cast<std::uint8_t>(value << (bit & 7));
+        if ((bit & 7) > 5) {
+            output[(bit >> 3) + 1] |= static_cast<std::uint8_t>(value >> (8 - (bit & 7)));
+        }
+    }
+}
+
+inline int unpack_q3_group(const std::uint8_t* input, int lane) {
+    const int bit = lane * 3;
+    std::uint32_t value = static_cast<std::uint32_t>(input[bit >> 3]) >> (bit & 7);
+    if ((bit & 7) > 5) {
+        value |= static_cast<std::uint32_t>(input[(bit >> 3) + 1]) << (8 - (bit & 7));
+    }
+    value &= 7u;
+    return (value & 4u) ? static_cast<int>(value) - 8 : static_cast<int>(value);
+}
+
 } // namespace detail
 
 struct PackedWeight {
@@ -216,7 +240,9 @@ struct PackedWeight {
             w.qhigh  = high_plane_bytes == 0
                            ? nullptr
                            : static_cast<std::uint8_t*>(device_payload) + high_plane_offset;
-            w.scales = static_cast<std::uint8_t*>(device_payload) + scale_plane_offset;
+            w.scales = w.qtype == QType::Q3G64_F16S
+                           ? nullptr
+                           : static_cast<std::uint8_t*>(device_payload) + scale_plane_offset;
         } else {
             w.qdata  = nullptr;
             w.qhigh  = nullptr;
@@ -328,6 +354,14 @@ inline double decode_row_split_lowbit_fp64(const PackedWeight& packed, std::int3
     const std::int32_t group          = column / spec.group_size;
     const std::int32_t lane           = column - group * spec.group_size;
     const std::size_t group_index     = static_cast<std::size_t>(row) * groups_per_row + group;
+    if (weight.qtype == QType::Q3G64_F16S) {
+        const std::size_t group_offset = group_index * 26;
+        const int signed_code = detail::unpack_q3_group(packed.payload.data() + group_offset, lane);
+        const std::uint16_t stored_scale =
+            detail::load_u16_le(packed.payload, group_offset + 24);
+        return static_cast<double>(signed_code) *
+               static_cast<double>(detail::f16_to_f32(stored_scale));
+    }
     const int nibble_bytes            = detail::nibble_bytes_per_group(spec);
     const int high_bytes              = detail::high_bytes_per_group(spec);
 
@@ -365,6 +399,25 @@ inline std::vector<float> decode_row_split_lowbit(const std::vector<std::uint8_t
     const int nib                = detail::nibble_bytes_per_group(spec);
     const int high_bpr           = detail::high_bytes_per_group(spec);
     const std::int32_t kg        = padded_k / spec.group_size;
+    if (qtype == QType::Q3G64_F16S) {
+        std::vector<float> deq(static_cast<std::size_t>(n) * k);
+        for (std::int32_t row = 0; row < n; ++row) {
+            for (std::int32_t g = 0; g < kg; ++g) {
+                const std::size_t group_index = static_cast<std::size_t>(row) * kg + g;
+                const std::uint8_t* packed_group = payload.data() + group_index * 26;
+                const float scale = detail::f16_to_f32(detail::load_u16_le(payload,
+                                                                           group_index * 26 + 24));
+                for (std::int32_t lane = 0; lane < 64; ++lane) {
+                    const std::int32_t kk = g * 64 + lane;
+                    if (kk < k) {
+                        deq[static_cast<std::size_t>(row) * k + kk] =
+                            static_cast<float>(detail::unpack_q3_group(packed_group, lane)) * scale;
+                    }
+                }
+            }
+        }
+        return deq;
+    }
     const std::size_t nibble_bytes =
         static_cast<std::size_t>(n) * static_cast<std::size_t>(kg) * static_cast<std::size_t>(nib);
     const std::size_t high_bytes = static_cast<std::size_t>(n) * static_cast<std::size_t>(kg) *
@@ -408,6 +461,14 @@ inline PackedWeight pack_row_split_lowbit(const std::vector<float>& source, std:
     const int high_bpr           = detail::high_bytes_per_group(spec);
 
     PackedWeight out;
+    const bool q3_group_interleaved = qtype == QType::Q3G64_F16S;
+    if (q3_group_interleaved) {
+        out.nibble_plane_bytes = static_cast<std::uint64_t>(n) * kg * 26ULL;
+        out.high_plane_offset = out.nibble_plane_bytes;
+        out.scale_plane_offset = 0;
+        out.scale_plane_bytes = 0;
+        out.payload.assign(static_cast<std::size_t>(out.nibble_plane_bytes), 0);
+    } else {
     out.nibble_plane_bytes = static_cast<std::uint64_t>(n) * static_cast<std::uint64_t>(kg) *
                              static_cast<std::uint64_t>(nib);
     out.high_plane_offset =
@@ -419,6 +480,7 @@ inline PackedWeight pack_row_split_lowbit(const std::vector<float>& source, std:
         detail::align_up_size(static_cast<std::size_t>(out.high_plane_bytes), 256);
     out.scale_plane_bytes = static_cast<std::uint64_t>(n) * static_cast<std::uint64_t>(kg) * 2ULL;
     out.payload.assign(static_cast<std::size_t>(out.scale_plane_offset + out.scale_plane_bytes), 0);
+    }
 
     std::int8_t codes[64];
     float vals[64];
@@ -443,18 +505,26 @@ inline PackedWeight pack_row_split_lowbit(const std::vector<float>& source, std:
             }
 
             const std::size_t group_index = static_cast<std::size_t>(row) * kg + g;
-            detail::pack_lowbit_group(codes, spec, out.payload.data() + group_index * nib,
-                                      high_bpr == 0 ? nullptr
-                                                    : out.payload.data() + out.high_plane_offset +
-                                                          group_index * high_bpr);
-            detail::store_u16_le(out.payload, out.scale_plane_offset + group_index * 2, scale_h);
+            if (q3_group_interleaved) {
+                detail::pack_q3_group(codes, out.payload.data() + group_index * 26);
+                detail::store_u16_le(out.payload, group_index * 26 + 24, scale_h);
+            } else {
+                detail::pack_lowbit_group(codes, spec, out.payload.data() + group_index * nib,
+                                          high_bpr == 0 ? nullptr
+                                                        : out.payload.data() +
+                                                              out.high_plane_offset +
+                                                              group_index * high_bpr);
+                detail::store_u16_le(out.payload, out.scale_plane_offset + group_index * 2,
+                                     scale_h);
+            }
         }
     }
 
     out.dequant = decode_row_split_lowbit(out.payload, n, k, padded_k, qtype);
 
     out.weight.qtype            = qtype;
-    out.weight.layout           = QuantLayout::RowSplit;
+    out.weight.layout           = q3_group_interleaved ? QuantLayout::GroupInterleaved
+                                                       : QuantLayout::RowSplit;
     out.weight.scale_dtype      = DType::FP16;
     out.weight.payload          = out.payload.data();
     out.weight.payload_bytes    = out.payload.size();
@@ -462,7 +532,8 @@ inline PackedWeight pack_row_split_lowbit(const std::vector<float>& source, std:
     out.weight.qdata            = out.payload.data();
     out.weight.qhigh =
         out.high_plane_bytes == 0 ? nullptr : out.payload.data() + out.high_plane_offset;
-    out.weight.scales          = out.payload.data() + out.scale_plane_offset;
+    out.weight.scales = q3_group_interleaved ? nullptr
+                                             : out.payload.data() + out.scale_plane_offset;
     out.weight.group_size      = static_cast<std::uint32_t>(spec.group_size);
     out.weight.group           = spec.group_size;
     out.weight.ndim            = 2;

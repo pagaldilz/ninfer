@@ -12,6 +12,7 @@ The initial storage registry contains exactly these identities:
 | Identity | Kind | Compatible numeric formats | Logical shape | Object alignment |
 |---|---|---|---|---:|
 | `contiguous-le-v1` | tensor layout | `BF16`, `FP32`, `I32` | rank `0..16` | 256 bytes |
+| `group-interleaved-v1` | tensor layout | `Q3G64_F16S` | rank 2 `[N,K]` | 256 bytes |
 | `row-split-k128-v1` | tensor layout | `Q4G64_F16S`, `Q5G64_F16S`, `Q6G64_F16S`, `W8G32_F16S` | rank 2 `[N,K]` | 256 bytes |
 | `raw-bytes-v1` | resource encoding | not applicable | nonempty byte string | 1 byte |
 
@@ -75,9 +76,25 @@ payload_bytes = elements * bytes_per_element(format)
 
 The tensor object's JSON `bytes` must equal `payload_bytes` exactly.
 
-## 3. `row-split-k128-v1`
+## 3. `group-interleaved-v1`
 
-### 3.1 Logical and physical geometry
+This layout is the native compact routed-expert layout for `Q3G64_F16S`. The logical tensor is a
+positive rank-two matrix `[N,K]`, `K` must be divisible by 64, and traversal is row-major by G64
+group. Every group occupies exactly 26 bytes: bytes `0..23` contain 64 consecutive signed
+three-bit two's-complement codes, least-significant bit first, and bytes `24..25` contain the
+little-endian binary16 group scale. Thus:
+
+```text
+groups_per_row = K / 64
+payload_bytes  = N * groups_per_row * 26
+```
+
+There are no internal planes, offsets, or padding. Code `u` decodes as `u - 8` when bit 2 is set,
+otherwise as `u`; the represented weight is that signed code multiplied by the stored scale.
+
+## 4. `row-split-k128-v1`
+
+### 4.1 Logical and physical geometry
 
 The logical tensor is a positive rank-two matrix `[N,K]`. The format supplies code width `b` and
 group size `G`:
@@ -106,7 +123,7 @@ scale remains the scale of the logical group defined by the numeric-format contr
 physical group after `logical_groups` has scale word `0x0000` and all codes zero. Physical padding
 therefore cannot change a decoded logical value.
 
-### 3.2 Payload planes
+### 4.2 Payload planes
 
 The payload contains three conceptual planes in this order:
 
@@ -129,7 +146,7 @@ row 0 group 0, row 0 group 1, ..., row 1 group 0, ...
 
 Bytes belonging to one group are adjacent.
 
-### 3.3 Base-code plane
+### 4.3 Base-code plane
 
 For Q4, Q5, and Q6, let `q[i]` be lane `i`'s signed code and let:
 
@@ -153,7 +170,7 @@ excludes code `-128` remains in force.
 The complete base plane is the concatenation of these per-group byte sequences in plane traversal
 order.
 
-### 3.4 High-bit plane
+### 4.4 High-bit plane
 
 Only Q5 and Q6 have a high-bit plane. For each lane:
 
@@ -173,7 +190,7 @@ Equivalently:
 
 One Q5 G64 group occupies 8 high bytes. One Q6 G64 group occupies 16 high bytes.
 
-### 3.5 Scale plane
+### 4.5 Scale plane
 
 Every physical group owns one 16-bit scale word. Scale words follow the same row/group traversal as
 the code planes and are stored little-endian:
@@ -185,7 +202,7 @@ scale_index(row, group) = row * groups_per_row + group
 For a logical group, the word is exactly the binary16 multiplier defined by its numeric format. The
 padding rule in Section 3.1 defines the scale words for wholly physical groups.
 
-### 3.6 Plane offsets and encoded size
+### 4.6 Plane offsets and encoded size
 
 Let:
 
@@ -219,7 +236,7 @@ For example, a Q5 tensor with shape `[2,130]` has `K_pad=256`, four groups per r
 `base_bytes=256`, `high_bytes=64`, `scale_bytes=16`, `high_offset=256`, `scale_offset=512`, and
 `payload_bytes=528`.
 
-### 3.7 Row views and row slices
+### 4.7 Row views and row slices
 
 Row addressability is an intrinsic property of this layout. Define:
 
@@ -247,7 +264,7 @@ the same plane order, with the plane offsets and zero padding recomputed from Se
 `N=row_count`. This produces another valid `row-split-k128-v1` tensor without decoding or repacking
 individual codes.
 
-## 4. `raw-bytes-v1`
+## 5. `raw-bytes-v1`
 
 `raw-bytes-v1` is a required-resource encoding, not a tensor layout. Its enclosing object payload is
 the resource byte string itself:
@@ -262,7 +279,7 @@ trailing padding. The resource object's JSON `bytes` is its exact nonzero length
 returns the complete span unchanged. A model contract assigns a resource name and interprets those
 bytes; the common encoding does not infer that meaning from the name.
 
-## 5. Decode boundary
+## 6. Decode boundary
 
 Layout decoding yields only persistent logical words:
 

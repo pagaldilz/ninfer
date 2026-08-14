@@ -38,7 +38,7 @@ struct Qwen3_6_27BInstance {
     std::unique_ptr<Qwen3_6_27B::Program> program;
 
     Qwen3_6_27BInstance(std::unique_ptr<LoadedQwen3_6_27B> stable_loaded,
-                               Qwen3_6_27B::SequencePlan sequence_plan,
+                               Qwen3_6_27B::SequencePlan&& sequence_plan,
                                DeviceContext& device);
     ~Qwen3_6_27BInstance();
 
@@ -67,7 +67,7 @@ struct Qwen3_6_35BA3BInstance {
     std::unique_ptr<Qwen3_6_35BA3B::Program> program;
 
     Qwen3_6_35BA3BInstance(std::unique_ptr<LoadedQwen3_6_35BA3B> stable_loaded,
-                                  Qwen3_6_35BA3B::SequencePlan sequence_plan,
+                                  Qwen3_6_35BA3B::SequencePlan&& sequence_plan,
                                   DeviceContext& device);
     ~Qwen3_6_35BA3BInstance();
 

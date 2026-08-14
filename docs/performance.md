@@ -1,6 +1,81 @@
 # Single-GPU serving performance
 
-Tested Git revision: `0795169393cab0f2c16246d4bac20dee735dc2a4`.
+## Windows RTX 5070 Ti hardware profile
+
+The Windows build has a dedicated single-request profile for an NVIDIA GeForce RTX 5070 Ti
+(16 GiB), Ryzen 9 9950X, and 64 GiB system. It uses CUDA 12.8, MSVC 14.42, INT8 group-64 KV,
+eager decode. Two artifacts were measured: the published `qwen3_6_35b_a3b.ninfer`
+(22,373,184,256 bytes) and the GGUF-sourced compact `.ninfer` profile
+(18,514,424,576 bytes, SHA-256
+`c989d0e1a6e3c31b2e175361075fa6eca48bfa2a055509d1490066b1896461ec`).
+
+This profile is deliberately different from the 32-GiB RTX 5090 route:
+
+- `--text-only` omits the 1.90-GiB worst-case Vision workspace reservation; Vision requests are
+  rejected by that Engine instance;
+- three device expert-cache banks retain selected `(layer, expert)` payloads for hosted MoE
+  layers and transfer only cache misses during decode;
+- cooperative GDN launches use runtime occupancy and fall back to an unsplit grid when the exact
+  launch cannot reside on the 5070 Ti;
+- Text GDN convolution uses the qualified one-thread-per-channel sequence kernel through 4,096
+  tokens; and
+- CUDA Graphs remain disabled because the artifact, sequence state, and graph allowance do not fit
+  the 16-GiB envelope together.
+
+The local llama.cpp results use the same machine, checkpoint family, one-slot workload, and exact
+context allocations. The compact artifact uses native Q3/Q4 expert layouts derived offline from
+the exercised 16.96-GiB IQ4_XS GGUF. It is still a `.ninfer` product artifact; GGUF parsing and
+I-quant decode are not part of startup or inference.
+
+Cross-engine prompts are token-count matched or near-matched, not byte-identical. The saved
+llama.cpp requests used chat-template text and varied synthetic records; `ninfer_bench` used the
+committed meaningful-token corpus, deterministically tiled to 240,000 tokens for the two longest
+tests. Since prompt content changes MTP acceptance, the table is an operational profile comparison,
+not a kernel-identical A/B experiment.
+
+| Reserved context and short request | Compact NInfer | llama.cpp saved result | NInfer change |
+|---|---:|---:|---:|
+| 32K, 54 prompt + 256 output | 100.09 +/- 1.11 tok/s | 141.96 tok/s | -29.5% |
+| 128K, 54 prompt + 256 output | 90.01 +/- 0.77 tok/s | 126.17 tok/s | -28.7% |
+| 256K, 54 prompt + 128 output | 79.36 +/- 0.54 tok/s | 78.54 tok/s Max Performance | +1.0% |
+
+The NInfer short-request sequence produced only 47.7% MTP acceptance at 32K and 128K and 58.6% at
+256K. These results supersede the earlier one-token-seed comparison for cross-engine claims. With
+that older one-token seed, compact NInfer measured 129.77, 118.72, and 101.53 tok/s respectively;
+the difference demonstrates that MTP acceptance, not context reservation alone, controls the short
+result. On the controlled 54-token sequence, NInfer loses 20.7% from 32K to 256K.
+
+| Filled workload | Compact NInfer prefill | llama.cpp prefill | Compact NInfer generation | llama.cpp generation |
+|---|---:|---:|---:|---:|
+| 32K: 30,615 / 30,634 prompt tokens | 4,047.63 +/- 0.65 | 1,772.73 | 111.05 +/- 0.37 | 28.73 |
+| 128K: 102,642 prompt tokens | 3,036.64 | 1,350.59 | 86.33 | 16.45 |
+| 256K: 234,984 prompt tokens | 2,116.30 | 871.89 | 65.94 | 54.11 |
+
+Across the three filled-context points, compact NInfer is 2.28x, 2.25x, and 2.43x faster in
+prefill, and 3.87x, 5.25x, and 1.22x faster in generation than the corresponding saved llama.cpp
+profiles. Their geometric-mean speedups are 2.32x for prefill and 2.91x for generation. The 128K
+NInfer result also exceeds the saved no-MTP Long profile's 62.72 generated tok/s by 37.6%.
+
+The full 262,144-token NInfer allocation fits with INT8-G64 KV: the near-full run reserves 10.51
+GiB of device weight capacity and 3.09 GiB of sequence state. llama.cpp uses Q4 KV for its 256K
+profiles. The final 32K compact prefill is also 19.1% faster than the published full NInfer profile.
+
+The retained compact prefill kernels decode Q3/Q4/Q6 weights and stage weight and activation MMA
+operands as FP16, use Tensor Core contractions with FP32 accumulation, keep the routed activation
+and grouped output in FP32, and perform the sole residual write in BF16. The independent Q3+Q4 and
+Q3+Q6 operator checks retain a maximum absolute prefill error of `1.953e-3`. Before this route was
+selected, a representative 4,096-token Nsight trace attributed 50.8% of GPU time to scalar Q3
+gate/up and 31.2% to scalar Q4/Q6 down. The final long-prompt report used one warm-up and two
+measured repetitions: `4,047.63 +/- 0.65` prefill tok/s and `111.05 +/- 0.37` generated tok/s.
+
+Build and reproduce both retained Windows profiles from a Developer Command Prompt:
+
+```bat
+set NINFER_BUILD_DIR=H:\AiModelLearning\Ninfer\build-win-5070ti-bench
+set NINFER_BUILD_BENCHMARKS=ON
+tools\windows\configure-5070ti.cmd
+tools\windows\benchmark-5070ti.cmd out\qwen3_6_35b_a3b_5070ti_gguf.ninfer
+```
 
 These measurements characterize the two registered NInfer targets independently on one NVIDIA
 GeForce RTX 5090. They cover long-context prefill and baseline decode with MTP disabled, plus

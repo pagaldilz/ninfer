@@ -9,7 +9,7 @@ artifacts, and run the CLI or HTTP server.
 |---|---|
 | [CLI](cli.md) | text, chat-history, image/video input, output streams, sampling, MTP, and common runtime options |
 | [HTTP serving](serving.md) | OpenAI Chat Completions, Anthropic Messages, streaming, token counting, authentication, and tool calls |
-| [Performance](performance.md) | RTX 5090 results, MTP-on/off measurements, llama.cpp comparison, and reproduction commands |
+| [Performance](performance.md) | RTX 5090 serving results plus the Windows RTX 5070 Ti hardware profile, llama.cpp comparison, and reproduction commands |
 | [CLI examples](../examples/cli/) | committed text, multimodal, thinking, long-decode, and long-context inputs |
 
 The executable `--help` output is the exact source for command-line option spelling and defaults.

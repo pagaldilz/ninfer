@@ -118,7 +118,11 @@ void Variant::gdn_output_gate_projection(const Tensor&, const GdnProjectionWeigh
 
 void Variant::post_mixer(const Tensor& hidden, const PostMixerWeights& weights, Tensor& residual,
                          WorkspaceArena& workspace, cudaStream_t stream) {
-    run_sparse_moe(hidden, weights.op, residual, workspace, stream);
+    if (weights.streamer != nullptr) {
+        weights.streamer->run(hidden, weights.op, residual, workspace, stream);
+    } else {
+        run_sparse_moe(hidden, weights.op, residual, workspace, stream);
+    }
 }
 
 void Variant::mtp_post_mixer(const Tensor& hidden, const MtpPostMixerWeights& weights,

@@ -36,8 +36,10 @@ LoadedModel::~LoadedModel() = default;
 
 namespace ninfer::targets::qwen3_6_35b_a3b {
 
-Package::LoadPlan Package::plan_load(artifact::Binder& binder) {
-    return LoadPlan(std::make_unique<LoadPlan::Impl>(detail::bind_artifact(binder)));
+Package::LoadPlan Package::plan_load(artifact::Binder& binder,
+                                     std::uint64_t device_weight_budget) {
+    return LoadPlan(std::make_unique<LoadPlan::Impl>(
+        detail::bind_artifact(binder, device_weight_budget)));
 }
 
 std::unique_ptr<Package::LoadedModel>
@@ -55,7 +57,13 @@ Package::Frontend Package::make_frontend(const LoadedModel& model) {
 }
 
 Package::SequencePlan Package::plan_sequence(DeviceContext& device, const EngineOptions& options) {
-    return qwen3_6::plan_sequence<detail::Variant>(device, options);
+    EngineOptions hardware_options = options;
+    if (device.total_vram() < 24ULL * 1024ULL * 1024ULL * 1024ULL) {
+        // CPU-resident leaves synchronize at their activation boundary and
+        // cannot participate in the current all-device CUDA Graph capture.
+        hardware_options.use_cuda_graph = false;
+    }
+    return qwen3_6::plan_sequence<detail::Variant>(device, hardware_options);
 }
 
 std::unique_ptr<Package::Program>

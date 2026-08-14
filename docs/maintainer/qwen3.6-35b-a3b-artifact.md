@@ -26,9 +26,45 @@ The target key selects one exact checkpoint package. It is not serialized as ano
 `model_id`. The closed registry maps this `model_id` to that package before loading.
 
 Every conforming artifact is one complete product image. It contains Text, the optimized draft
-head, MTP, Vision, and the six frontend resources in this document. There are no Text-only,
-no-Vision, no-MTP, alternate-quantization, GGUF-compatible, or runtime-repacked variants. The
-quantization assignment is part of the exact target contract rather than a converter option.
+head, MTP, Vision, and the six frontend resources in this document. Two closed storage profiles are
+accepted for this exact target: the published full-precision assignment described by the inventory
+below and the RTX 5070 Ti compact profile in section 1.1. Neither profile is Text-only,
+Vision-free, MTP-free, a GGUF runtime lane, nor runtime-repacked. The selected artifact's format
+assignment is bound before allocation and execution.
+
+### 1.1 RTX 5070 Ti compact profile
+
+The compact profile retains the same `model_id`, object names, logical shapes, frontend resources,
+MTP, Vision, expert order, and public Engine semantics. It replaces exactly 76 Text expert objects:
+
+- `text/layers/0..38/moe/routed_gate_up` use `Q3G64_F16S` with
+  `group-interleaved-v1`;
+- routed-down objects use `Q4G64_F16S` on layers `0..38` except promoted layers 34 and 38;
+- layers 34 and 38 retain Q6 routed-down, and layer 39 retains its published Q4/Q6 assignment.
+
+The exercised source is
+`Qwen3.6-35B-A3B-UD-IQ4_XS.gguf`: llama.cpp's official `gguf-py` decoder expands IQ3_S/IQ4_XS
+expert weights offline, after which NInfer requantizes them into its native Q3/Q4 contracts. NInfer
+never parses GGUF during model loading or inference. All unchanged objects are copied from the
+complete published `.ninfer` artifact, so the offline conversion requires both inputs.
+
+The qualified local artifact is 18,514,424,576 bytes (17.24 GiB), SHA-256
+`c989d0e1a6e3c31b2e175361075fa6eca48bfa2a055509d1490066b1896461ec`. Build it with:
+
+```powershell
+python tools/convert/qwen3_6_35b_a3b/repack_gguf_experts.py `
+  --base out/qwen3_6_35b_a3b.ninfer `
+  --gguf C:/Users/Zack/.lmstudio/models/unsloth/Qwen3.6-35B-A3B-MTP-GGUF/Qwen3.6-35B-A3B-UD-IQ4_XS.gguf `
+  --llama-cpp-source C:/tmp/ninfer-llama.cpp-src `
+  --out out/qwen3_6_35b_a3b_5070ti_gguf.ninfer `
+  --report out/qwen3_6_35b_a3b_5070ti_gguf.conversion.json
+```
+
+On the 16-GiB route, uniform Q3/Q4 layers may be host-resident and stage only selected experts into
+three device cache banks. Mixed Q3/Q6 promoted layers remain device-resident. The offline IQ-to-Q3
+and IQ-to-Q4 step is a second quantization boundary; local operator-oracle checks and a coherent
+greedy chat generation qualify execution, but they are not a substitute for a broad model-quality
+evaluation.
 
 The responsibility split is:
 
@@ -994,6 +1030,13 @@ MMA contractions with FP32 accumulation; W8 routed and shared contractions use t
 shapes. A route-weighted inverse reduction and the shared-down epilogue perform the sole BF16
 residual write. No host synchronization, selected-weight repack, capacity factor, or token drop is
 introduced.
+
+The RTX 5070 Ti compact Q3 gate/up and paired Q4/Q6 down route uses FP16 Tensor Core operands with
+FP32 accumulation. Q3 gate/up writes the routed activation in FP32; down consumes that FP32 value,
+stages it as FP16 for MMA, and writes the grouped expert result in FP32. This is an
+implementation-private arithmetic profile, not a persistent FP16 tensor format. Q3+Q4 and Q3+Q6
+prefill are each qualified directly against the same exact-dequantized naive oracle, with a local
+maximum absolute error of `1.953e-3` at the exercised test shapes.
 
 Production selects the first trace-like RTX 5090 crossover for each routed codec: prefill begins at
 `T=12` for Q4+Q5, `T=11` for Q4+Q6, and `T=7` for W8+W8; smaller multi-column shapes use Small-T.

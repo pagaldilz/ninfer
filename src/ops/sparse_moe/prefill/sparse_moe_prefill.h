@@ -79,9 +79,13 @@ SparseMoePrefillWorkspace allocate_sparse_moe_prefill_workspace(Arena& arena,
     out.score_storage = arena.alloc(DType::FP32, {kSparseMoeRouterScoreRows, capacity_tokens}, 256);
     out.shared_activation = Tensor(out.score_storage.data, DType::BF16, {512, capacity_tokens});
 
-    out.grouped_io = arena.alloc(DType::BF16, {2048, assignments}, 256);
+    // The compact route reuses this allocation for FP32 expert outputs after BF16 gathering.
+    out.grouped_io = arena.alloc(DType::FP32, {2048, assignments}, 256);
 
-    out.routed_storage = arena.alloc(DType::BF16, {512, assignments}, 256);
+    // The compact Q3 route keeps the routed activation in FP32 through its down projection.
+    // Legacy routes continue to interpret the first half as BF16; the storage lifetime is shared
+    // with routed_sum after the projection completes.
+    out.routed_storage = arena.alloc(DType::FP32, {512, assignments}, 256);
     out.routed_sum     = Tensor(out.routed_storage.data, DType::FP32, {2048, capacity_tokens});
     return out;
 }
@@ -91,6 +95,17 @@ SparseMoePrefillWorkspace allocate_sparse_moe_prefill_workspace(Arena& arena,
 [[nodiscard]] std::size_t sparse_moe_prefill_workspace_bytes(std::int32_t max_tokens);
 [[nodiscard]] SparseMoePrefillPlan
 resolve_sparse_moe_prefill_plan(std::int32_t tokens, QType routed_gate_up, QType routed_down);
+
+// Split-phase entry points used by host-resident sparse expert streaming. Route selection is
+// completed and made host-visible before only the selected expert row spans are uploaded; the
+// selected phase consumes the retained route workspace without recomputing it.
+void sparse_moe_prefill_launch_route(const Tensor& x, const Weight& router_shared_gate,
+                                     const SparseMoePrefillWorkspace& workspace,
+                                     cudaStream_t stream);
+void sparse_moe_prefill_launch_selected(const Tensor& x, const SparseMoeWeights& weights,
+                                        Tensor& destination,
+                                        const SparseMoePrefillWorkspace& workspace,
+                                        cudaStream_t stream);
 
 void sparse_moe_prefill_launch(const Tensor& x, const SparseMoeWeights& weights,
                                Tensor& destination, const SparseMoePrefillPlan& plan,

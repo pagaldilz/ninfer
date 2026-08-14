@@ -79,6 +79,18 @@ PayloadSpan Binder::payload(ObjectHandle handle) const {
     return reader_.payload(descriptor(handle));
 }
 
+NumericFormat Binder::tensor_format(std::string_view name) const {
+    const ObjectDescriptor* object = reader_.find(name);
+    if (object == nullptr) {
+        throw ArtifactError("required artifact object is missing: " + std::string(name));
+    }
+    const auto* tensor = std::get_if<TensorDescriptor>(object);
+    if (tensor == nullptr) {
+        throw ArtifactError("required tensor is a resource: " + std::string(name));
+    }
+    return tensor->format;
+}
+
 void Binder::materialize_on_device(ObjectHandle handle) {
     const auto* tensor = std::get_if<TensorDescriptor>(&descriptor(handle));
     if (tensor == nullptr) {
@@ -97,6 +109,20 @@ void Binder::materialize_on_device(ObjectHandle handle) {
         DeviceMaterialization{handle, offset, tensor->bytes, alignment});
     materialization_.device_capacity_bytes = offset + tensor->bytes;
     planned_[handle.index]                 = true;
+}
+
+void Binder::materialize_tensor_on_host(ObjectHandle handle) {
+    const auto* tensor = std::get_if<TensorDescriptor>(&descriptor(handle));
+    if (tensor == nullptr) {
+        throw ArtifactError("resource cannot be materialized as a host tensor");
+    }
+    if (planned_[handle.index]) {
+        throw ArtifactError("artifact object has more than one materialization placement: " +
+                            std::string(tensor->name));
+    }
+    materialization_.host_tensor_objects.push_back(
+        HostTensorMaterialization{handle, tensor->bytes, 64});
+    planned_[handle.index] = true;
 }
 
 void Binder::retain_on_host(ObjectHandle handle) {

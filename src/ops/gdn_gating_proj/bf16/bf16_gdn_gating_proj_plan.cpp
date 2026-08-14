@@ -37,7 +37,7 @@ constexpr std::array<RouteSpec, 6> k27Routes{{
 }};
 
 constexpr std::array<RouteSpec, 5> k35Routes{{
-    // The same progression keeps the long-range cooperative routes near 256 CTAs.
+    // Launch-time occupancy validation handles smaller compute-capability 12.0 devices.
     {{1, 127}, Bf16GdnGatingScheduleId::MmaCooperativeSplit16},
     {{128, 1024}, Bf16GdnGatingScheduleId::MmaCooperativeSplit8},
     {{1025, 2048}, Bf16GdnGatingScheduleId::MmaCooperativeSplit4},

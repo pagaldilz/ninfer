@@ -29,7 +29,10 @@ SparseMoeSmallTPlan resolve_sparse_moe_small_t_plan(std::int32_t tokens, QType r
         (routed_down == QType::Q5G64_F16S || routed_down == QType::Q6G64_F16S);
     const bool mtp_profile =
         routed_gate_up == QType::W8G32_F16S && routed_down == QType::W8G32_F16S;
-    if (!main_profile && !mtp_profile) {
+    const bool compact_profile =
+        routed_gate_up == QType::Q3G64_F16S &&
+        (routed_down == QType::Q4G64_F16S || routed_down == QType::Q6G64_F16S);
+    if (!main_profile && !mtp_profile && !compact_profile) {
         throw std::invalid_argument("sparse_moe small-T: unsupported routed codec profile");
     }
 

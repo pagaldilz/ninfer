@@ -274,6 +274,23 @@ void launch_bf16_prefill_mma(Bf16GdnGatingTokenVariant variant, const Tensor& x,
             cudaFuncAttributeMaxDynamicSharedMemorySize, kSmemBytes);
         CUDA_CHECK(attr);
         if constexpr (SplitK > 1) {
+            int device = 0;
+            int active_blocks_per_sm = 0;
+            cudaDeviceProp properties{};
+            CUDA_CHECK(cudaGetDevice(&device));
+            CUDA_CHECK(cudaGetDeviceProperties(&properties, device));
+            CUDA_CHECK(cudaOccupancyMaxActiveBlocksPerMultiprocessor(
+                &active_blocks_per_sm,
+                bf16_gdn_gating_proj_gemm_mma_kernel<Geometry, SplitK, FullTokens, Warps>,
+                static_cast<int>(block.x), kSmemBytes));
+            const std::uint64_t grid_blocks = static_cast<std::uint64_t>(grid.x) * grid.y * grid.z;
+            const std::uint64_t resident_blocks =
+                static_cast<std::uint64_t>(active_blocks_per_sm) * properties.multiProcessorCount;
+            if (grid_blocks > resident_blocks) {
+                launch_bf16_prefill_mma<Geometry, 1, Warps>(
+                    variant, x, a_weight, b_weight, A_log, dt_bias, nullptr, g, beta, stream);
+                return;
+            }
             cudaLaunchConfig_t config{};
             config.gridDim          = grid;
             config.blockDim         = block;

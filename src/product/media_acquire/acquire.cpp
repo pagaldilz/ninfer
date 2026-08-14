@@ -2,9 +2,17 @@
 
 #include <curl/curl.h>
 
+#if defined(_WIN32)
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#else
 #include <arpa/inet.h>
 #include <netdb.h>
 #include <sys/socket.h>
+#endif
 
 #include <algorithm>
 #include <array>
@@ -129,7 +137,12 @@ std::string resolve_public(const UrlParts& url, bool allow_private) {
     const int rc      = getaddrinfo(url.host.c_str(), url.port.c_str(), &hints, &raw);
     if (rc != 0) {
         throw Error(ErrorKind::RemoteUnavailable,
-                    "failed to resolve media URL host: " + std::string(gai_strerror(rc)));
+                    "failed to resolve media URL host: " +
+#if defined(_WIN32)
+                        std::string(gai_strerrorA(rc)));
+#else
+                        std::string(gai_strerror(rc)));
+#endif
     }
     std::unique_ptr<addrinfo, decltype(&freeaddrinfo)> addresses(raw, freeaddrinfo);
     std::string selected;
@@ -142,7 +155,12 @@ std::string resolve_public(const UrlParts& url, bool allow_private) {
                       &reinterpret_cast<const sockaddr_in*>(it->ai_addr)->sin_addr)
                 : static_cast<const void*>(
                       &reinterpret_cast<const sockaddr_in6*>(it->ai_addr)->sin6_addr);
+#if defined(_WIN32)
+        if (InetNtopA(it->ai_family, const_cast<void*>(bytes), text.data(),
+                      static_cast<DWORD>(text.size())) != nullptr) {
+#else
         if (inet_ntop(it->ai_family, bytes, text.data(), text.size()) != nullptr) {
+#endif
             selected = text.data();
             if (it->ai_family == AF_INET) { break; }
         }
@@ -244,7 +262,7 @@ std::vector<std::uint8_t> read_path(const Source& source, const Policy& policy) 
     if (!policy.media_root.empty()) {
         const std::filesystem::path root = std::filesystem::weakly_canonical(policy.media_root, ec);
         const auto relative              = std::filesystem::relative(path, root, ec);
-        if (ec || relative.empty() || relative.native().starts_with("..")) {
+        if (ec || relative.empty() || relative.generic_string().starts_with("..")) {
             throw std::invalid_argument("media path is outside configured media root");
         }
     }

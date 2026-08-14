@@ -275,6 +275,7 @@ std::string usage_text(std::string_view program) {
         << "  --lm-head-draft             use the optimized proposal head; requires MTP\n"
         << "  --device <id>               CUDA device ordinal (default: 0)\n"
         << "  --no-cuda-graph             use eager decode\n"
+        << "  --text-only                 omit worst-case Vision workspace reservation\n"
         << "  --profile-measured          bracket one measured repetition with CUDA profiler API\n"
         << "  -o, --output <table|json|csv>  output format (default: table)\n"
         << "  --output-file <path>        write report to a file\n"
@@ -335,6 +336,8 @@ BenchOptions parse_args(int argc, char** argv) {
             options.device = parse_nonnegative(value("--device"), "device");
         } else if (arg == "--no-cuda-graph") {
             options.use_cuda_graph = false;
+        } else if (arg == "--text-only") {
+            options.text_only = true;
         } else if (arg == "--profile-measured") {
             options.profile_measured = true;
         } else if (arg == "-o" || arg == "--output") {
@@ -554,7 +557,9 @@ std::string format_table(const BenchEnvironment& env, const std::vector<TestResu
         << " bytes)\n"
         << "  load:       " << env.load.load_seconds << " s, upload " << env.load.upload_seconds
         << " s, read " << format_bytes(env.load.artifact_bytes_read) << ", H2D "
-        << format_bytes(env.load.host_to_device_bytes) << ", staging peak "
+        << format_bytes(env.load.host_to_device_bytes) << ", host tensors "
+        << format_bytes(env.load.host_tensor_bytes) << " (" << env.load.host_tensor_count
+        << "), staging peak "
         << format_bytes(env.load.peak_staging_bytes) << '\n'
         << "  memory:     weights " << format_bytes(env.memory.weights.capacity_bytes)
         << ", sequence " << format_bytes(env.memory.sequence.capacity_bytes) << ", workspace "
@@ -630,8 +635,10 @@ std::string format_json(const BenchEnvironment& env, const std::string& command,
         << "    \"upload_seconds\": " << number(env.load.upload_seconds) << ",\n"
         << "    \"artifact_bytes_read\": " << env.load.artifact_bytes_read << ",\n"
         << "    \"host_to_device_bytes\": " << env.load.host_to_device_bytes << ",\n"
+        << "    \"host_tensor_bytes\": " << env.load.host_tensor_bytes << ",\n"
         << "    \"peak_staging_bytes\": " << env.load.peak_staging_bytes << ",\n"
         << "    \"tensor_count\": " << env.load.tensor_count << ",\n"
+        << "    \"host_tensor_count\": " << env.load.host_tensor_count << ",\n"
         << "    \"resource_count\": " << env.load.resource_count << "\n"
         << "  },\n"
         << "  \"memory\": {\n"
@@ -691,6 +698,12 @@ std::string format_json(const BenchEnvironment& env, const std::string& command,
             const RepTiming& rep = result.reps[r];
             out << "        {\n"
                 << "          \"generated_output_tokens\": " << rep.generated_output_tokens << ",\n"
+                << "          \"generated_token_ids\": [";
+            for (std::size_t token = 0; token < rep.generated_token_ids.size(); ++token) {
+                if (token != 0) { out << ','; }
+                out << rep.generated_token_ids[token];
+            }
+            out << "],\n"
                 << "          \"decode_output_tokens\": "
                 << (result.test.has_decode() ? std::to_string(result.test.n_gen) : "null") << ",\n"
                 << "          \"decode_engine_tokens\": "

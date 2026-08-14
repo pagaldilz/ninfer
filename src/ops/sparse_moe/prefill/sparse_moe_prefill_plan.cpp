@@ -13,6 +13,10 @@ std::int32_t prefill_min_tokens(QType routed_gate_up, QType routed_down) noexcep
         if (routed_down == QType::Q5G64_F16S) { return kSparseMoePrefillQ4Q5Min; }
         if (routed_down == QType::Q6G64_F16S) { return kSparseMoePrefillQ4Q6Min; }
     }
+    if (routed_gate_up == QType::Q3G64_F16S &&
+        (routed_down == QType::Q4G64_F16S || routed_down == QType::Q6G64_F16S)) {
+        return kSparseMoePrefillQ4Q5Min;
+    }
     if (routed_gate_up == QType::W8G32_F16S && routed_down == QType::W8G32_F16S) {
         return kSparseMoePrefillW8W8Min;
     }

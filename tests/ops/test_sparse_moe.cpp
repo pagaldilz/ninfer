@@ -1,4 +1,6 @@
 #include "ninfer/ops/sparse_moe.h"
+#include "ninfer/ops/cpu_sparse_moe.h"
+#include "ops/sparse_moe/streaming/streaming_sparse_moe.h"
 
 #include "ops/op_tester.h"
 #include "ops/row_split_pack.h"
@@ -10,12 +12,14 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <iostream>
 #include <limits>
 #include <memory>
 #include <numeric>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -86,6 +90,8 @@ struct GuardedBf16Output {
 
 QuantGeometry geometry(QType qtype) {
     switch (qtype) {
+    case QType::Q3G64_F16S:
+        return {64, 26, 0};
     case QType::Q4G64_F16S:
         return {64, 32, 0};
     case QType::Q5G64_F16S:
@@ -108,15 +114,17 @@ public:
                           geometry_.code_bytes_per_group),
           high_row_bytes_(static_cast<std::size_t>(groups_per_row_) *
                           geometry_.high_bytes_per_group),
-          scale_row_bytes_(static_cast<std::size_t>(groups_per_row_) * 2),
+          scale_row_bytes_(qtype == QType::Q3G64_F16S
+                               ? 0
+                               : static_cast<std::size_t>(groups_per_row_) * 2),
           codes_(static_cast<std::size_t>(rows) * code_row_bytes_),
-          scales_(static_cast<std::size_t>(rows) * scale_row_bytes_) {
+          scales_(std::max<std::size_t>(1, static_cast<std::size_t>(rows) * scale_row_bytes_)) {
         if (high_row_bytes_ != 0) {
             high_ = std::make_unique<DBuf>(static_cast<std::size_t>(rows) * high_row_bytes_);
         }
         cudaMemset(codes_.p, 0, codes_.bytes);
         if (high_) { cudaMemset(high_->p, 0, high_->bytes); }
-        cudaMemset(scales_.p, 0, scales_.bytes);
+        if (scale_row_bytes_ != 0) { cudaMemset(scales_.p, 0, scales_.bytes); }
     }
 
     void copy_rows(const row_split::PackedWeight& source, std::int32_t destination_row) {
@@ -137,26 +145,30 @@ public:
                        source.payload.data() + source.high_plane_offset, high_bytes,
                        cudaMemcpyHostToDevice);
         }
-        cudaMemcpy(static_cast<std::uint8_t*>(scales_.p) +
-                       static_cast<std::size_t>(destination_row) * scale_row_bytes_,
-                   source.payload.data() + source.scale_plane_offset, scale_bytes,
-                   cudaMemcpyHostToDevice);
+        if (scale_bytes != 0) {
+            cudaMemcpy(static_cast<std::uint8_t*>(scales_.p) +
+                           static_cast<std::size_t>(destination_row) * scale_row_bytes_,
+                       source.payload.data() + source.scale_plane_offset, scale_bytes,
+                       cudaMemcpyHostToDevice);
+        }
     }
 
     Weight weight() const {
         Weight out{};
         out.payload          = codes_.p;
-        out.payload_bytes    = codes_.bytes + (high_ ? high_->bytes : 0) + scales_.bytes;
+        out.payload_bytes    = codes_.bytes + (high_ ? high_->bytes : 0) +
+                            (scale_row_bytes_ == 0 ? 0 : scales_.bytes);
         out.high_plane_bytes = high_ ? high_->bytes : 0;
         out.qtype            = qtype_;
         out.group_size       = static_cast<std::uint32_t>(geometry_.group);
         out.qdata            = codes_.p;
         out.qhigh            = high_ ? high_->p : nullptr;
-        out.scales           = scales_.p;
+        out.scales           = scale_row_bytes_ == 0 ? nullptr : scales_.p;
         out.n                = rows_;
         out.k                = columns_;
         out.group            = geometry_.group;
-        out.layout           = QuantLayout::RowSplit;
+        out.layout           = qtype_ == QType::Q3G64_F16S ? QuantLayout::GroupInterleaved
+                                                            : QuantLayout::RowSplit;
         out.scale_dtype      = DType::FP16;
         out.ndim             = 2;
         out.shape[0]         = rows_;
@@ -178,6 +190,82 @@ private:
     DBuf codes_;
     std::unique_ptr<DBuf> high_;
     DBuf scales_;
+};
+
+class HostRowSplit {
+public:
+    HostRowSplit(QType qtype, std::int32_t rows, std::int32_t columns)
+        : qtype_(qtype), rows_(rows), columns_(columns), geometry_(geometry(qtype)),
+          groups_per_row_(columns / geometry_.group),
+          code_row_bytes_(static_cast<std::size_t>(groups_per_row_) *
+                          geometry_.code_bytes_per_group),
+          high_row_bytes_(static_cast<std::size_t>(groups_per_row_) *
+                          geometry_.high_bytes_per_group),
+          scale_row_bytes_(qtype == QType::Q3G64_F16S
+                               ? 0
+                               : static_cast<std::size_t>(groups_per_row_) * 2),
+          codes_(static_cast<std::size_t>(rows) * code_row_bytes_),
+          high_(static_cast<std::size_t>(rows) * high_row_bytes_),
+          scales_(static_cast<std::size_t>(rows) * scale_row_bytes_) {}
+
+    void copy_rows(const row_split::PackedWeight& source, std::int32_t destination_row) {
+        const std::int32_t source_rows = source.weight.n;
+        if (source.weight.qtype != qtype_ || source.weight.k != columns_ || destination_row < 0 ||
+            source_rows <= 0 || destination_row > rows_ - source_rows) {
+            throw std::invalid_argument("invalid host packed test row copy");
+        }
+        const std::size_t code_bytes  = static_cast<std::size_t>(source_rows) * code_row_bytes_;
+        const std::size_t high_bytes  = static_cast<std::size_t>(source_rows) * high_row_bytes_;
+        const std::size_t scale_bytes = static_cast<std::size_t>(source_rows) * scale_row_bytes_;
+        std::memcpy(codes_.data() + static_cast<std::size_t>(destination_row) * code_row_bytes_,
+                    source.payload.data(), code_bytes);
+        if (high_bytes != 0) {
+            std::memcpy(high_.data() + static_cast<std::size_t>(destination_row) * high_row_bytes_,
+                        source.payload.data() + source.high_plane_offset, high_bytes);
+        }
+        if (scale_bytes != 0) {
+            std::memcpy(scales_.data() +
+                            static_cast<std::size_t>(destination_row) * scale_row_bytes_,
+                        source.payload.data() + source.scale_plane_offset, scale_bytes);
+        }
+    }
+
+    Weight weight() const {
+        Weight out{};
+        out.payload          = codes_.data();
+        out.payload_bytes    = codes_.size() + high_.size() + scales_.size();
+        out.high_plane_bytes = high_.size();
+        out.qtype            = qtype_;
+        out.group_size       = static_cast<std::uint32_t>(geometry_.group);
+        out.qdata            = codes_.data();
+        out.qhigh            = high_.empty() ? nullptr : high_.data();
+        out.scales           = scales_.empty() ? nullptr : scales_.data();
+        out.n                = rows_;
+        out.k                = columns_;
+        out.group            = geometry_.group;
+        out.layout           = qtype_ == QType::Q3G64_F16S ? QuantLayout::GroupInterleaved
+                                                            : QuantLayout::RowSplit;
+        out.scale_dtype      = DType::FP16;
+        out.ndim             = 2;
+        out.shape[0]         = rows_;
+        out.shape[1]         = columns_;
+        out.padded_shape[0]  = rows_;
+        out.padded_shape[1]  = columns_;
+        return out;
+    }
+
+private:
+    QType qtype_;
+    std::int32_t rows_;
+    std::int32_t columns_;
+    QuantGeometry geometry_;
+    std::int32_t groups_per_row_;
+    std::size_t code_row_bytes_;
+    std::size_t high_row_bytes_;
+    std::size_t scale_row_bytes_;
+    std::vector<std::uint8_t> codes_;
+    std::vector<std::uint8_t> high_;
+    std::vector<std::uint8_t> scales_;
 };
 
 Weight dense_bf16_weight(void* data, std::int32_t rows, std::int32_t columns) {
@@ -408,7 +496,7 @@ int expect_invalid(const char* label, const auto& call) {
 
 int run_case(const CodecProfile& profile, const RouteCase& route, const char* case_name, int tokens,
              int unique_columns, bool graph_replay, bool validate_contract,
-             const std::vector<RouteCase>& route_columns = {}) {
+             const std::vector<RouteCase>& route_columns = {}, bool validate_cpu = false) {
     if (!route_columns.empty() && static_cast<int>(route_columns.size()) != unique_columns) {
         throw std::invalid_argument("route column count must match unique input columns");
     }
@@ -452,6 +540,20 @@ int run_case(const CodecProfile& profile, const RouteCase& route, const char* ca
     DeviceRowSplit routed_down(profile.routed_down, kRoutedDownRows, kIntermediate);
     DeviceRowSplit shared_gate(QType::W8G32_F16S, kSharedGateRows, kHidden);
     DeviceRowSplit shared_down_device(QType::W8G32_F16S, kHidden, kIntermediate);
+    std::unique_ptr<HostRowSplit> host_routed_gate;
+    std::unique_ptr<HostRowSplit> host_routed_down;
+    std::unique_ptr<HostRowSplit> host_shared_gate_rows;
+    std::unique_ptr<HostRowSplit> host_shared_down_rows;
+    if (validate_cpu) {
+        host_routed_gate =
+            std::make_unique<HostRowSplit>(profile.routed_gate_up, kRoutedGateRows, kHidden);
+        host_routed_down =
+            std::make_unique<HostRowSplit>(profile.routed_down, kRoutedDownRows, kIntermediate);
+        host_shared_gate_rows =
+            std::make_unique<HostRowSplit>(QType::W8G32_F16S, kSharedGateRows, kHidden);
+        host_shared_down_rows =
+            std::make_unique<HostRowSplit>(QType::W8G32_F16S, kHidden, kIntermediate);
+    }
 
     std::vector<HostExpert> host_experts;
     std::vector<int> populated_experts;
@@ -475,6 +577,10 @@ int run_case(const CodecProfile& profile, const RouteCase& route, const char* ca
             kHidden, kIntermediate, profile.routed_down);
         routed_gate.copy_rows(gate_up, expert * kExpertGateRows);
         routed_down.copy_rows(down, expert * kHidden);
+        if (validate_cpu) {
+            host_routed_gate->copy_rows(gate_up, expert * kExpertGateRows);
+            host_routed_down->copy_rows(down, expert * kHidden);
+        }
         host_experts.push_back({expert, std::move(gate_up), std::move(down)});
     }
 
@@ -484,6 +590,10 @@ int run_case(const CodecProfile& profile, const RouteCase& route, const char* ca
         make_down(kHidden, kIntermediate, 0x731u, 0.87f), kHidden, kIntermediate);
     shared_gate.copy_rows(host_shared_gate, 0);
     shared_down_device.copy_rows(host_shared_down, 0);
+    if (validate_cpu) {
+        host_shared_gate_rows->copy_rows(host_shared_gate, 0);
+        host_shared_down_rows->copy_rows(host_shared_down, 0);
+    }
 
     ops::SparseMoeWeights weights{
         dense_bf16_weight(device_router.p, kExperts + 1, kHidden),
@@ -551,6 +661,50 @@ int run_case(const CodecProfile& profile, const RouteCase& route, const char* ca
         ++failures;
     }
 
+    if (validate_cpu) {
+        std::vector<std::uint16_t> host_router(router.size());
+        std::transform(router.begin(), router.end(), host_router.begin(), f32_to_bf16);
+        ops::SparseMoeWeights host_weights{
+            dense_bf16_weight(host_router.data(), kExperts + 1, kHidden),
+            host_routed_gate->weight(),
+            host_routed_down->weight(),
+            host_shared_gate_rows->weight(),
+            host_shared_down_rows->weight(),
+        };
+        DBuf cpu_device_residual = to_device_bf16(residual);
+        Tensor cpu_residual(cpu_device_residual.p, DType::BF16, {kHidden, tokens});
+        ops::CpuSparseMoeExecutor cpu_executor(16);
+        cpu_executor.run(x, host_weights, cpu_residual, workspace, nullptr);
+        cudaDeviceSynchronize();
+        const std::vector<double> cpu_actual =
+            from_device_bf16(cpu_device_residual, residual.size());
+        const std::string cpu_case_name = std::string(case_name) + " CPU";
+        failures += verify(cpu_case_name.c_str(), cpu_actual, reference, profile.tolerance);
+
+        ops::SparseMoeWeights mixed_weights{
+            weights.router_shared_gate,
+            host_routed_gate->weight(),
+            host_routed_down->weight(),
+            weights.shared_gate_up,
+            weights.shared_down,
+        };
+        DeviceArena streaming_arena(ops::detail::streaming_sparse_moe_device_bytes());
+        ops::detail::StreamingSparseMoeExecutor streamer(streaming_arena);
+        DBuf streaming_residual_seed = to_device_bf16(residual);
+        Tensor streaming_residual(streaming_residual_seed.p, DType::BF16, {kHidden, tokens});
+        cudaStream_t streaming_stream = nullptr;
+        cudaStreamCreateWithFlags(&streaming_stream, cudaStreamNonBlocking);
+        streamer.run(x, mixed_weights, streaming_residual, workspace, streaming_stream);
+        cudaStreamSynchronize(streaming_stream);
+        cudaStreamDestroy(streaming_stream);
+        cudaDeviceSynchronize();
+        const std::vector<double> streaming_actual =
+            from_device_bf16(streaming_residual_seed, residual.size());
+        const std::string streaming_case_name = std::string(case_name) + " streamed";
+        failures += verify(streaming_case_name.c_str(), streaming_actual, reference,
+                           profile.tolerance);
+    }
+
     if (validate_contract) {
         failures += expect_invalid("sparse_moe zero max_tokens",
                                    [] { (void)ops::sparse_moe_workspace_bytes(0); });
@@ -598,19 +752,53 @@ int run_case(const CodecProfile& profile, const RouteCase& route, const char* ca
 
 } // namespace
 
-int main() {
+int main(int argc, char** argv) {
     if (cuda_unavailable()) {
         std::cout << "SKIP: no usable CUDA device\n";
         return 0;
     }
 
-    const std::array<CodecProfile, 3> profiles = {{
+    const std::array<CodecProfile, 5> profiles = {{
         {"sparse_moe q4+q5", QType::Q4G64_F16S, QType::Q5G64_F16S, Tolerance::sparse_moe_q4_q5()},
         {"sparse_moe q4+q6", QType::Q4G64_F16S, QType::Q6G64_F16S, Tolerance::sparse_moe_q4_q6()},
         {"sparse_moe w8+w8", QType::W8G32_F16S, QType::W8G32_F16S, Tolerance::sparse_moe_w8_w8()},
+        {"sparse_moe q3+q4", QType::Q3G64_F16S, QType::Q4G64_F16S,
+         Tolerance::sparse_moe_q4_q5()},
+        {"sparse_moe q3+q6", QType::Q3G64_F16S, QType::Q6G64_F16S,
+         Tolerance::sparse_moe_q4_q6()},
     }};
     const RouteCase ordinary_route{{255, 0, 17, 31, 63, 127, 191, 223}, -1};
     const RouteCase boundary_tie{{0, 17, 31, 63, 127, 191, 223, 254}, 255};
+    if (argc == 2 && std::string_view(argv[1]) == "--cpu-only") {
+        int focused_failures = run_case(profiles[0], ordinary_route, "sparse_moe q4+q5", 1, 1,
+                                        false, false, {}, true);
+        focused_failures += run_case(profiles[0], ordinary_route,
+                                     "sparse_moe q4+q5 streamed small-T", 4, 1, false, false, {},
+                                     true);
+        focused_failures += run_case(profiles[0], ordinary_route,
+                                     "sparse_moe q4+q5 streamed prefill", 45, 1, false, false, {},
+                                     true);
+        return focused_failures;
+    }
+    if (argc == 2 && std::string_view(argv[1]) == "--q3-only") {
+        int focused_failures = 0;
+        try {
+            focused_failures = run_case(profiles[3], ordinary_route,
+                                        "sparse_moe q3+q4 decode", 1, 1, false, false);
+            focused_failures += run_case(profiles[3], ordinary_route,
+                                         "sparse_moe q3+q4 prefill", 45, 1, false, false);
+            focused_failures += run_case(profiles[4], ordinary_route,
+                                         "sparse_moe q3+q6 decode", 1, 1, false, false);
+            focused_failures += run_case(profiles[4], ordinary_route,
+                                         "sparse_moe q3+q6 prefill", 45, 1, false, false);
+        } catch (const std::exception& error) {
+            std::cerr << "q3 qualification exception: " << error.what() << '\n';
+            return 1;
+        }
+        std::cout << (focused_failures ? "FAIL" : "OK")
+                  << " sparse_moe q3+q4 correctness\n";
+        return focused_failures ? 1 : 0;
+    }
     const std::vector<RouteCase> correlated_routes = {
         {{{0, 32, 64, 96, 128, 160, 224, 255}}, -1}, {{{0, 32, 64, 96, 129, 161, 225, 254}}, -1},
         {{{0, 32, 65, 97, 129, 161, 225, 253}}, -1}, {{{1, 33, 65, 97, 129, 162, 226, 253}}, -1},
@@ -626,7 +814,7 @@ int main() {
     int failures = 0;
     for (std::size_t index = 0; index < profiles.size(); ++index) {
         failures += run_case(profiles[index], ordinary_route, profiles[index].name, 1, 1, false,
-                             index == 0);
+                             index == 0, {}, index == 0);
     }
     // Codec decoding, routing tie behavior, exact-T dispatch, and per-token routing are
     // orthogonal test dimensions.

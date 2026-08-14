@@ -14,6 +14,7 @@
 #include <cstdlib>
 #include <filesystem>
 #include <iostream>
+#include <limits>
 #include <numeric>
 #include <stdexcept>
 #include <string>
@@ -118,7 +119,7 @@ int run(const Options& options) {
         throw std::invalid_argument("artifact model_id does not match qwen3.6-27b");
     }
     ninfer::artifact::Binder binder(reader);
-    auto load_plan = target::Package::plan_load(binder);
+    auto load_plan = target::Package::plan_load(binder, std::numeric_limits<std::uint64_t>::max());
     auto materialized =
         ninfer::artifact::materialize(reader, load_plan.materialization(), device, nullptr);
     auto model =

@@ -20,6 +20,7 @@ import torch
 from .numeric import (
     DirectFormat,
     NumericFormat,
+    PackedGroupFormat,
     QuantFormat,
     get_format,
 )
@@ -79,9 +80,15 @@ ROW_SPLIT_K128_V1 = Layout(
     256,
     frozenset(("Q4G64_F16S", "Q5G64_F16S", "Q6G64_F16S", "W8G32_F16S")),
 )
+GROUP_INTERLEAVED_V1 = Layout(
+    "group-interleaved-v1", 256, frozenset(("Q3G64_F16S",))
+)
 
 LAYOUTS = MappingProxyType(
-    {layout.name: layout for layout in (CONTIGUOUS_LE_V1, ROW_SPLIT_K128_V1)}
+    {
+        layout.name: layout
+        for layout in (CONTIGUOUS_LE_V1, ROW_SPLIT_K128_V1, GROUP_INTERLEAVED_V1)
+    }
 )
 
 
@@ -197,6 +204,14 @@ def encoded_size(
         if not isinstance(numeric_spec, QuantFormat):
             raise ValueError("row-split-k128-v1 requires a grouped quantized format")
         return row_split_geometry(numeric_spec, shape).payload_bytes
+    if layout_spec is GROUP_INTERLEAVED_V1:
+        if not isinstance(numeric_spec, PackedGroupFormat):
+            raise ValueError("group-interleaved-v1 requires a packed-group format")
+        n, k = _shape(shape, rank=2)
+        if k % numeric_spec.group_size:
+            raise ValueError("group-interleaved-v1 requires complete logical groups")
+        code_bytes = numeric_spec.group_size * numeric_spec.bits // 8
+        return n * (k // numeric_spec.group_size) * (code_bytes + 2)
     raise ValueError(f"unsupported tensor layout: {layout_spec.name!r}")
 
 

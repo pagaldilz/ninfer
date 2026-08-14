@@ -36,7 +36,7 @@ LoadedModel::~LoadedModel() = default;
 
 namespace ninfer::targets::qwen3_6_27b {
 
-Package::LoadPlan Package::plan_load(artifact::Binder& binder) {
+Package::LoadPlan Package::plan_load(artifact::Binder& binder, std::uint64_t) {
     return LoadPlan(std::make_unique<LoadPlan::Impl>(detail::bind_artifact(binder)));
 }
 
