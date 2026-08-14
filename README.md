@@ -168,6 +168,10 @@ docker run --rm \
   --host 0.0.0.0
 ```
 
+On the qualified Windows RTX 5070 Ti + RTX 5060 Ti setup, `startup.bat` launches the Qwen3.8
+endpoint-offload profile from the verified `D:\AiModels\NInfer` artifact on
+`http://127.0.0.1:8085/v1`. See the [serving guide](docs/serving.md) for its client settings.
+
 Run the CLI from the same image:
 
 ```bash

@@ -49,10 +49,17 @@ parallelism. The option is rejected for every artifact identity except
 `qwen3.8-27b/groupwise-int`.
 
 For the repository's Linux build running under Docker Desktop on Windows, expose only the local
-loopback port:
+loopback port. On the qualified RTX 5070 Ti + RTX 5060 Ti machine, the repository launcher performs
+the prerequisite checks and starts this profile on port 8085:
 
 ```powershell
-docker run --rm --gpus all -p 127.0.0.1:18080:8080 `
+.\startup.bat
+```
+
+The equivalent expanded command is:
+
+```powershell
+docker run --rm --gpus all -p 127.0.0.1:8085:8080 `
   -v "${PWD}:/workspace" -v "D:\AiModels\NInfer:/models:ro" `
   -w /workspace ninfer-rtx50-dev:cuda13.1 `
   ./build-rtx50-linux/apps/ninfer-serve `
@@ -63,7 +70,7 @@ docker run --rm --gpus all -p 127.0.0.1:18080:8080 `
   --model-id qwen3.8-27b --api-key local-secret
 ```
 
-Clients use base URL `http://127.0.0.1:18080/v1`, model ID `qwen3.8-27b`, and API key
+Clients use base URL `http://127.0.0.1:8085/v1`, model ID `qwen3.8-27b`, and API key
 `local-secret`. NInfer remains the model server: another application can consume this compatible
 endpoint, but it does not make `.ninfer` a GGUF file or load it through that application's native
 runtime.
@@ -72,7 +79,7 @@ Verify the process before configuring a graphical client:
 
 ```powershell
 $headers = @{ Authorization = "Bearer local-secret" }
-Invoke-RestMethod http://127.0.0.1:18080/v1/models -Headers $headers
+Invoke-RestMethod http://127.0.0.1:8085/v1/models -Headers $headers
 ```
 
 ### Unsloth Desktop and LM Studio clients
@@ -80,12 +87,12 @@ Invoke-RestMethod http://127.0.0.1:18080/v1/models -Headers $headers
 NInfer must remain the process that owns the model and both GPUs. In Unsloth Desktop, open Chat's
 connection settings, add a **Custom** connection, and enter:
 
-- Base URL: `http://127.0.0.1:18080/v1`
+- Base URL: `http://127.0.0.1:8085/v1`
 - API key: `local-secret`
 - manual model ID: `qwen3.8-27b`
 
 If Unsloth itself is running in a container, use
-`http://host.docker.internal:18080/v1` instead of `127.0.0.1`. The installed Unsloth Studio custom
+`http://host.docker.internal:8085/v1` instead of `127.0.0.1`. The installed Unsloth Studio custom
 provider uses the OpenAI-compatible Chat Completions and Models routes exposed above.
 
 LM Studio's native model loader cannot load a `.ninfer` artifact. Its Chat UI can consume NInfer

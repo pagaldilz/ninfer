@@ -247,7 +247,7 @@ python experiments/rtx50/benchmark_openai.py --model qwen38-bench
 Run the measured MTP3 endpoint from the NVMe copy:
 
 ```powershell
-docker run --rm --gpus all -p 127.0.0.1:18080:8080 `
+docker run --rm --gpus all -p 127.0.0.1:8085:8080 `
   -v "${PWD}:/workspace" -v "D:\AiModels\NInfer:/models:ro" `
   -w /workspace ninfer-rtx50-dev:cuda13.1 `
   ./build-rtx50-linux/apps/ninfer-serve /models/qwen3_8_27b.ninfer `
